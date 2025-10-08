@@ -14,3 +14,4 @@ def prepare_data(ration_df: pd.DataFrame) -> pd.DataFrame:
           'концентраты % СВ', 'премикс дойный % СВ', 'мел % СВ', 'соль % СВ', 'поташ % СВ']
     new_data_x = new_data_x.drop(cc, axis=1, errors='ignore')
     return new_data_x
+

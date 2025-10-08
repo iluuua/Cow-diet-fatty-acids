@@ -5,9 +5,14 @@ from typing import Dict
 
 import pandas as pd
 import camelot  # Requires camelot-py[cv]
+try:
+    from pdf2image import convert_from_path
+    import pytesseract
+    OCR_AVAILABLE = True
+except ImportError:
+    OCR_AVAILABLE = False
 
 from preprocessing.filtration import categorize_feed, feed_types
-
 
 def numeric_from_str(s):
     if pd.isna(s):
@@ -16,14 +21,26 @@ def numeric_from_str(s):
     m = re.search(r'-?\d+\.\d+|-?\d+', s)
     return float(m.group(0)) if m else None
 
+def ocr_pdf(pdf_path: str) -> str:
+    if not OCR_AVAILABLE:
+        print("OCR dependencies not found. Install pdf2image and pytesseract.")
+        return ''
+    try:
+        images = convert_from_path(pdf_path)
+        text = ''
+        for image in images:
+            text += pytesseract.image_to_string(image, lang='rus+eng') + '\n'
+        return text
+    except Exception as e:
+        print(f"OCR error: {e}. Ensure poppler and tesseract are installed.")
+        return ''
 
 def find_tables(pdf_path):
     try:
         return camelot.read_pdf(str(pdf_path), pages='all', flavor='lattice', strip_text='\n')
     except Exception as e:
-        print(f"Error reading PDF: {e}")
+        print(f"PDF read error: {e}")
         return []
-
 
 def classify_tables(tables):
     recipe_tables = []
@@ -35,7 +52,6 @@ def classify_tables(tables):
         elif re.search(r'Сводный анализ|Нутриент|Лактирующая корова', flat_text, re.I):
             nutrient_tables.append(table)
     return recipe_tables, nutrient_tables
-
 
 def parse_ingredients_table(table):
     df = table.df.copy()
@@ -51,7 +67,6 @@ def parse_ingredients_table(table):
             ingredients[name] = percent_sv_value
     return ingredients
 
-
 def parse_nutrients_table(table):
     df = table.df.copy()
     name_col_idx = 0
@@ -59,27 +74,101 @@ def parse_nutrients_table(table):
     nutrients = {}
     for _, row in df.iterrows():
         name = str(row.iloc[name_col_idx]).strip()
-        if not name or re.search(r'гистриент|единица|сводный', name, re.I):
+        if not name or re.search(r'нутриент|единица|сводный', name, re.I):
             continue
         sv_value = numeric_from_str(row.iloc[sv_col_idx])
         if sv_value is not None:
             nutrients[name] = sv_value
     return nutrients
 
+def parse_ingredients_from_text(text: str) -> Dict[str, float]:
+    lines = text.split('\n')
+    in_ingredients = False
+    ingredients = {}
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if re.search(r'Ингредиенты|Рецепт', line, re.I):
+            in_ingredients = True
+            continue
+        if re.search(r'Общие значения|Сводный анализ', line, re.I):
+            in_ingredients = False
+            continue
+        if in_ingredients:
+            match = re.search(r'(\d+[.,]\d+|\d+)', line)
+            if match:
+                name = line[:match.start()].strip()
+                if not name:
+                    continue
+                numbers_str = line[match.start():]
+                numbers = re.findall(r'[\d.]+', numbers_str)  # Remove commas for float
+                if len(numbers) >= 5:
+                    percent_sv_str = numbers[4]
+                    try:
+                        percent_sv = float(percent_sv_str.replace(',', '.'))
+                        if 0 <= percent_sv <= 100:
+                            ingredients[name] = percent_sv
+                    except ValueError:
+                        pass
+    return ingredients
+
+def parse_nutrients_from_text(text: str) -> Dict[str, float]:
+    lines = text.split('\n')
+    in_nutrients = False
+    nutrients = {}
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if re.search(r'Сводный анализ|Нутриент|Лактирующая корова', line, re.I):
+            in_nutrients = True
+            continue
+        if re.search(r'Сводка CNCPS|Pag\.', line, re.I):
+            in_nutrients = False
+            continue
+        if in_nutrients:
+            match = re.search(r'(\d+[.,]\d+|\d+)', line)
+            if match:
+                name_and_unit = line[:match.start()].strip()
+                if not name_and_unit:
+                    continue
+                # Split to separate name and unit
+                parts = name_and_unit.split()
+                if len(parts) >= 2:
+                    unit = parts[-1]
+                    name = ' '.join(parts[:-1])
+                else:
+                    name = name_and_unit
+                    unit = ''
+                sv_str = match.group(0).replace(',', '.')
+                try:
+                    sv = float(sv_str)
+                    nutrients[name] = sv
+                except ValueError:
+                    pass
+    return nutrients
 
 def parse_pdf_diet(pdf_path: str) -> Dict:
     tables = find_tables(pdf_path)
-    recipe_tables, nutrient_tables = classify_tables(tables)
-
     all_ingredients = {}
-    for table in recipe_tables:
-        ingredients = parse_ingredients_table(table)
-        all_ingredients.update(ingredients)
-
     all_nutrients = {}
-    for table in nutrient_tables:
-        nutrients = parse_nutrients_table(table)
-        all_nutrients.update(nutrients)
+    if tables:
+        recipe_tables, nutrient_tables = classify_tables(tables)
+        for table in recipe_tables:
+            ingredients = parse_ingredients_table(table)
+            all_ingredients.update(ingredients)
+        for table in nutrient_tables:
+            nutrients = parse_nutrients_table(table)
+            all_nutrients.update(nutrients)
+    else:
+        text = ocr_pdf(pdf_path)
+        if text:
+            all_ingredients = parse_ingredients_from_text(text)
+            all_nutrients = parse_nutrients_from_text(text)
+        else:
+            print(f"Unable to parse {pdf_path} - no tables or OCR failed.")
+            return {}
 
     ingred_by_code = {code: 0.0 for code in feed_types.keys()}
     ratios = {'corn': 0.0, 'soybean': 0.0, 'alfalfa': 0.0, 'other': 0.0}
@@ -109,37 +198,3 @@ def parse_pdf_diet(pdf_path: str) -> Dict:
         'nutrients': all_nutrients,
         'ratios': ratios
     }
-
-
-def parse_excel_fatty_acids(file_path: str) -> Dict[str, float]:
-    try:
-        df = pd.read_excel(file_path)
-        fatty_acid_columns = {
-            'lauric': ['lauric', 'lauric acid', 'C12:0', 'C12', 'лауриновая', 'лауриновая кислота'],
-            'palmitic': ['palmitic', 'palmitic acid', 'C16:0', 'C16', 'пальмитиновая', 'пальмитиновая кислота'],
-            'stearic': ['stearic', 'stearic acid', 'C18:0', 'C18', 'стеариновая', 'стеариновая кислота'],
-            'oleic': ['oleic', 'oleic acid', 'C18:1', 'C18:1n9', 'олеиновая', 'олеиновая кислота'],
-            'linoleic': ['linoleic', 'linoleic acid', 'C18:2', 'C18:2n6', 'линолевая', 'линолевая кислота'],
-            'linolenic': ['linolenic', 'linolenic acid', 'C18:3', 'C18:3n3', 'линоленовая', 'линоленовая кислота']
-        }
-        result = {}
-        for acid_name, possible_names in fatty_acid_columns.items():
-            found_value = None
-            for col in df.columns:
-                col_lower = str(col).lower()
-                for name in possible_names:
-                    if name.lower() in col_lower:
-                        for idx, row in df.iterrows():
-                            value = row[col]
-                            if pd.notna(value) and isinstance(value, (int, float)):
-                                found_value = float(value)
-                                break
-                        if found_value is not None:
-                            break
-                if found_value is not None:
-                    break
-            result[acid_name] = found_value if found_value is not None else 0.0
-        return result
-    except Exception as e:
-        print(f"Excel parsing error: {str(e)}")
-        return {}

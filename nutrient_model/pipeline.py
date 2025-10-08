@@ -2,7 +2,7 @@ import pandas
 import torch
 
 
-def load_model(path="/kaggle/working/nutrients->acids_03941_400_MLP.pkl"):
+def load_model(path="../parameters/nutrients-_acids_03941_400_MLP.pkl"):
     return joblib.load(path)
 
 
