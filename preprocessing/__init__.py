@@ -13,14 +13,10 @@ from .prepare import (
 )
 from .parser import (
     parse_pdf_diet,
-    parse_pdf_ingredients,
-    parse_pdf_nutrients,
 )
 
 __all__ = [
     'parse_pdf_diet',
-    'parse_pdf_ingredients',
-    'parse_pdf_nutrients',
     'prepare_ingredients_df',
     'prepare_nutrients_df',
     'prepare_ratios',

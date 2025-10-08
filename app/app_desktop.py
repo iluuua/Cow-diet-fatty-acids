@@ -7,10 +7,13 @@
 import os
 import sys
 
-# Принудительно устанавливаем платформу Qt
-os.environ['QT_QPA_PLATFORM'] = 'xcb'
-if sys.platform == 'darwin':
+# Принудительно устанавливаем платформу Qt (по ОС)
+if sys.platform.startswith('linux'):
+    os.environ['QT_QPA_PLATFORM'] = 'xcb'
+elif sys.platform == 'darwin':
     os.environ['QT_QPA_PLATFORM'] = 'cocoa'
+elif sys.platform.startswith('win'):
+    os.environ['QT_QPA_PLATFORM'] = 'windows'
 
 from PyQt6.QtWidgets import *
 from PyQt6.QtCore import *
@@ -33,6 +36,8 @@ from preprocessing import (
     map_nutrients_to_features,
 )
 from parameters.model import MilkFattyAcidPredictor
+from ingredient_model.pipeline import predict_from_ingredients
+from nutrient_model.pipeline import predict_from_nutrients
 
 
 class MplCanvas(FigureCanvasQTAgg):
@@ -469,7 +474,26 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Ошибка валидации", message)
                 return
 
-            predictions = self.model.predict_fatty_acids(diet_ratios)
+            # Собираем входы для двух пайплайнов
+            # 1) По ингредиентам: возьмём введённые пользователем коды с ненулевыми значениями
+            ingredients_by_code = {code: spin.value() for code, spin in self.ingredient_inputs.items() if spin.value() > 0}
+            # Для модели ингредиентов нужен маппинг имя->%, у нас коды. Сконвертируем к именам (лейблам) из feed_types.
+            from preprocessing import feed_types
+            ingredients_by_name = {feed_types.get(code, code): val for code, val in ingredients_by_code.items()}
+
+            # 2) По нутриентам: соберём Value_i
+            nutrients_by_feat = {k: v.value() for k, v in self.nutrient_inputs.items() if v.value() > 0}
+
+            # Предсказания двух моделей
+            pred_ingr = predict_from_ingredients(ingredients_by_name)
+            pred_nutr = predict_from_nutrients(nutrients_by_feat)
+
+            # Усреднение
+            acids = ['lauric', 'palmitic', 'stearic', 'oleic', 'linoleic', 'linolenic']
+            predictions = {}
+            for a in acids:
+                predictions[a] = (float(pred_ingr.get(a, 0.0)) + float(pred_nutr.get(a, 0.0))) / 2.0
+
             self.current_predictions = predictions
 
             # Заполняем таблицу предсказаний
