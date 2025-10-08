@@ -25,19 +25,8 @@ FATTY_ACIDS = [
 # Словарь жирных кислот (ключ -> название)
 FATTY_ACID_NAMES = {key: name for key, name in FATTY_ACIDS}
 
-# Ингредиенты рациона
-INGREDIENTS = [
-    ('forage', 'Фураж'),
-    ('flax_meal', 'Жмых льняной'),
-    ('yeast', 'Дрожжи'),
-    ('dry_grains', 'Дробина сухая'),
-    ('concentrates', 'Концентраты'),
-    ('premix_milk', 'Премикс дойный'),
-    ('chalk', 'Мел'),
-    ('salt', 'Соль'),
-    ('potash', 'Поташ')
+
+
+nutrient_names = [
+
 ]
-
-# Словарь ингредиентов (ключ -> название)
-INGREDIENT_NAMES = {key: name for key, name in INGREDIENTS}
-

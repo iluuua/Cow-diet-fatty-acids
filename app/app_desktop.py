@@ -25,7 +25,7 @@ from matplotlib.figure import Figure
 from datetime import datetime
 from database import DatabaseManager
 from utils import validate_diet_ratios
-from utils.constants import FATTY_ACID_NAMES
+from utils.constants import FATTY_ACID_NAMES, ingredient_names, nutrient_names
 from preprocessing import (
     parse_pdf_diet,
     INGREDIENT_FEATURES,
