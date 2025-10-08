@@ -1,6 +1,7 @@
 import os
 import json
 import zipfile
+from pathlib import Path
 from typing import Dict, Tuple
 
 import numpy as np
@@ -9,12 +10,24 @@ import pandas as pd
 from preprocessing import prepare_ingredients_df
 
 
-def load_xgboost_models_safe(zip_filename='xgboost_models.zip'):
+DEFAULT_ZIP = str((Path(__file__).resolve().parent.parent / 'parameters' / 'xgboost_models.zip'))
+
+
+def load_xgboost_models_safe(zip_filename: str | None = None):
     """Безопасная загрузка с автоматическим именованием папки"""
+    if zip_filename is None:
+        zip_filename = DEFAULT_ZIP
+
+    # Если архива нет — не падаем
+    if not os.path.exists(zip_filename):
+        print(f"⚠️ Архив моделей не найден: {zip_filename}")
+        return None, {}, None
 
     # Создаем уникальное имя папки на основе времени
     import time
-    extract_to = f'loaded_models_{int(time.time())}'
+    parameters_dir = Path(__file__).resolve().parent.parent / 'parameters'
+    parameters_dir.mkdir(parents=True, exist_ok=True)
+    extract_to = str(parameters_dir / f'loaded_models_{int(time.time())}')
 
     # Распаковываем
     with zipfile.ZipFile(zip_filename, 'r') as zipf:
@@ -51,7 +64,7 @@ def load_xgboost_models_safe(zip_filename='xgboost_models.zip'):
     return None, None, extract_to
 
 
-model, params, folder = load_xgboost_models_safe('../parameters/xgboost_models.zip')
+model, params, folder = load_xgboost_models_safe()
 
 
 def predict_from_ingredients(ingredients_by_name: Dict[str, float]) -> Dict[str, float]:
@@ -61,9 +74,12 @@ def predict_from_ingredients(ingredients_by_name: Dict[str, float]) -> Dict[str,
     # Готовим DataFrame входов
     X_df = prepare_ingredients_df(ingredients_by_name)
 
-    # Если модель не доступна — вернём пустые прогнозы
+    # Если модель не загружена — пробуем подгрузить лениво
+    global model, params, folder
     if model is None:
-        return {k: 0.0 for k in ['lauric', 'palmitic', 'stearic', 'oleic', 'linoleic', 'linolenic']}
+        model, params, folder = load_xgboost_models_safe()
+        if model is None:
+            return {k: 0.0 for k in ['lauric', 'palmitic', 'stearic', 'oleic', 'linoleic', 'linolenic']}
 
     try:
         y = model.predict(X_df)
