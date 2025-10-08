@@ -1,70 +1,73 @@
-import os
-import json
-import zipfile
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, List
 
 import numpy as np
-import pandas as pd
 
 from preprocessing import prepare_ingredients_df
 
-
-DEFAULT_ZIP = str((Path(__file__).resolve().parent.parent / 'parameters' / 'xgboost_models.zip'))
-
-
-def load_xgboost_models_safe(zip_filename: str | None = None):
-    """Безопасная загрузка с автоматическим именованием папки"""
-    if zip_filename is None:
-        zip_filename = DEFAULT_ZIP
-
-    # Если архива нет — не падаем
-    if not os.path.exists(zip_filename):
-        print(f"⚠️ Архив моделей не найден: {zip_filename}")
-        return None, {}, None
-
-    # Создаем уникальное имя папки на основе времени
-    import time
-    parameters_dir = Path(__file__).resolve().parent.parent / 'parameters'
-    parameters_dir.mkdir(parents=True, exist_ok=True)
-    extract_to = str(parameters_dir / f'loaded_models_{int(time.time())}')
-
-    # Распаковываем
-    with zipfile.ZipFile(zip_filename, 'r') as zipf:
-        zipf.extractall(extract_to)
-
-    print(f"📦 Распаковано в: {extract_to}/")
-
-    # Ищем файлы модели
-    for file in os.listdir(extract_to):
-        if file.endswith('.joblib'):
-            model_path = os.path.join(extract_to, file)
-            try:
-                import joblib
-                model = joblib.load(model_path)
-            except Exception:
-                model = None
-            print(f"✅ Загружена модель: {file}")
-
-            # Ищем параметры
-            param_file = file.replace('.joblib', '.json').replace('_model', '_params')
-            param_path = os.path.join(extract_to, param_file)
-
-            if os.path.exists(param_path):
-                with open(param_path, 'r') as f:
-                    params = json.load(f)
-                print(f"✅ Загружены параметры: {param_file}")
-            else:
-                params = {}
-                print("⚠️ Параметры не найдены")
-
-            return model, params, extract_to
-
-    print("❌ Модель не найдена в архиве")
-    return None, None, extract_to
+try:
+    import joblib
+except Exception:
+    joblib = None
+try:
+    import warnings
+    from sklearn.exceptions import InconsistentVersionWarning
+    warnings.filterwarnings("ignore", category=InconsistentVersionWarning)
+except Exception:
+    pass
 
 
-model, params, folder = load_xgboost_models_safe()
+PARAMETERS_DIR = Path(__file__).resolve().parent.parent / 'parameters'
+
+
+def _find_ingredient_model_files() -> List[Path]:
+    ordered: List[Path] = []
+    names_first = [
+        'best_models.pkl',
+        'best_model.pkl',
+        'best_models.joblib',
+        'best_model.joblib',
+    ]
+    for name in names_first:
+        p = PARAMETERS_DIR / name
+        if p.exists():
+            ordered.append(p)
+    # Добавляем остальные по маскам (исключая уже добавленные)
+    patterns = ['best_model*.pkl', 'best_model*.joblib', 'best_models*.pkl', 'best_models*.joblib']
+    extras: List[Path] = []
+    for pattern in patterns:
+        extras.extend(PARAMETERS_DIR.glob(pattern))
+    seen = {p.resolve() for p in ordered}
+    extras = [p for p in extras if p.resolve() not in seen]
+    extras.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return ordered + extras
+
+
+def _load_ingredient_model():
+    if joblib is None:
+        return None
+    candidates = _find_ingredient_model_files()
+    if not candidates:
+        print(f"⚠️ Файл модели ингредиентов не найден в: {PARAMETERS_DIR}")
+        return None
+    for model_path in candidates:
+        try:
+            obj = joblib.load(str(model_path))
+            # Возможные структуры: dict с ключом 'XGBoost' или 'model', либо сама модель
+            if isinstance(obj, dict):
+                if 'XGBoost' in obj:
+                    x = obj['XGBoost']
+                    return x[0] if isinstance(x, (list, tuple)) and len(x) > 0 else x
+                if 'model' in obj:
+                    return obj['model']
+            return obj
+        except Exception:
+            continue
+    print(f"❌ Не удалось загрузить ни один файл модели ингредиентов из: {PARAMETERS_DIR}")
+    return None
+
+
+INGR_MODEL = _load_ingredient_model()
 
 
 def predict_from_ingredients(ingredients_by_name: Dict[str, float]) -> Dict[str, float]:
@@ -75,14 +78,14 @@ def predict_from_ingredients(ingredients_by_name: Dict[str, float]) -> Dict[str,
     X_df = prepare_ingredients_df(ingredients_by_name)
 
     # Если модель не загружена — пробуем подгрузить лениво
-    global model, params, folder
-    if model is None:
-        model, params, folder = load_xgboost_models_safe()
-        if model is None:
+    global INGR_MODEL
+    if INGR_MODEL is None:
+        INGR_MODEL = _load_ingredient_model()
+        if INGR_MODEL is None:
             return {k: 0.0 for k in ['lauric', 'palmitic', 'stearic', 'oleic', 'linoleic', 'linolenic']}
 
     try:
-        y = model.predict(X_df)
+        y = INGR_MODEL.predict(X_df)
         # Поддержка как для скаляра, так и для массива из 6 таргетов
         if isinstance(y, (list, tuple, np.ndarray)) and len(np.atleast_1d(y)) >= 6:
             arr = np.atleast_2d(y)

@@ -388,6 +388,54 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 QMessageBox.critical(self, "Ошибка", f"Ошибка загрузки: {str(e)}")
 
+    def load_test_data(self):
+        """Загрузка демонстрационных данных в поля формы."""
+        try:
+            # Название рациона
+            self.diet_name.setText("Тестовый рацион")
+
+            # Параметры рациона (группы)
+            defaults = {"corn": 40.0, "soybean": 25.0, "alfalfa": 25.0, "other": 10.0}
+            for key, spin in self.pred_inputs.items():
+                spin.setValue(defaults.get(key, 0.0))
+
+            # Ингредиенты по кодам: заполним несколько первых как пример
+            sample_ingr_by_code = {}
+            for idx, (code, _label) in enumerate(INGREDIENT_FEATURES):
+                if idx == 0:
+                    sample_ingr_by_code[code] = 35.0
+                elif idx == 1:
+                    sample_ingr_by_code[code] = 20.0
+                elif idx == 2:
+                    sample_ingr_by_code[code] = 15.0
+                elif idx == 3:
+                    sample_ingr_by_code[code] = 10.0
+                else:
+                    break
+            for code, spin in self.ingredient_inputs.items():
+                spin.setValue(sample_ingr_by_code.get(code, 0.0))
+
+            # Нутриенты (Value_i): заполним первые несколько
+            sample_nutrients = {}
+            for idx, feat in enumerate(NUTRIENT_FEATURES):
+                if idx < 10:
+                    sample_nutrients[feat] = float(100 + idx * 10)
+                else:
+                    break
+            for feat, spin in self.nutrient_inputs.items():
+                spin.setValue(sample_nutrients.get(feat, 0.0))
+
+            # Отобразим собранные данные в таблице результатов загрузки
+            data = {
+                'ingredients_by_code': sample_ingr_by_code,
+                'nutrients': sample_nutrients,
+                'ratios': defaults,
+            }
+            self.display_loading_results(data, "TEST")
+            QMessageBox.information(self, "Успех", "Загружены тестовые данные.")
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Ошибка загрузки тестовых данных: {str(e)}")
+
     def display_loading_results(self, data, file_type):
         """Отображение результатов парсинга"""
         try:

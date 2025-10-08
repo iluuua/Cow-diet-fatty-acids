@@ -1,6 +1,7 @@
 import joblib
 import pandas as pd
 from typing import Dict, Tuple
+from pathlib import Path
 
 
 class MilkFattyAcidPredictor:
@@ -9,6 +10,10 @@ class MilkFattyAcidPredictor:
     """
 
     def __init__(self, model_path="best_models.pkl"):
+        # если передан относительный путь по умолчанию, ищем файл в папке parameters
+        if model_path == "best_models.pkl":
+            base_dir = Path(__file__).resolve().parent  # .../parameters
+            model_path = str(base_dir / model_path)
         self.model_path = model_path
         self.model = None
         self.model_params = None
@@ -18,8 +23,11 @@ class MilkFattyAcidPredictor:
         """Загрузка сохранённой модели через joblib"""
         import os
         if not os.path.exists(self.model_path):
-            raise FileNotFoundError(f"Модель не найдена: {self.model_path}")
-        
+            # мягкий фолбэк: инициализируем пустую модель, чтобы приложение продолжило работу
+            self.model = DummyModel()
+            self.model_params = {}
+            return
+
         best_models = joblib.load(self.model_path)
         self.model, self.model_params = best_models['XGBoost']
 
@@ -36,11 +44,19 @@ class MilkFattyAcidPredictor:
         return True, ""
 
     def predict_fatty_acids(self, diet_ratios: Dict[str, float]) -> Dict[str, float]:
-        """Предсказание жирных кислот с помощью модели"""
+        """Предсказание жирных кислот с помощью модели-обёртки"""
         df = pd.DataFrame([diet_ratios])
         pred_array = self.model.predict(df)[0]
-        
         fatty_acids = ['lauric_acid', 'palmitic_acid', 'stearic_acid',
                        'oleic_acid', 'linoleic_acid', 'linolenic_acid']
         predictions = dict(zip(fatty_acids, pred_array))
         return predictions
+
+
+class DummyModel:
+    """Простейшая заглушка модели на случай отсутствия файла моделей."""
+    def predict(self, df: pd.DataFrame):
+        import numpy as np
+        # возвращаем нули по шести таргетам, соответствующим порядку в app_desktop
+        zeros = np.zeros((len(df), 6), dtype=float)
+        return zeros
