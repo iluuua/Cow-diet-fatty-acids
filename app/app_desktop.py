@@ -32,7 +32,7 @@ from preprocessing import (
     NUTRIENT_FEATURES,
     map_nutrients_to_features,
 )
-from parameters.model import MilkFattyAcidPredictor, create_sample_data
+from parameters.model import MilkFattyAcidPredictor
 
 
 class MplCanvas(FigureCanvasQTAgg):
@@ -133,7 +133,8 @@ class MainWindow(QMainWindow):
         ingr_layout = QGridLayout(ingr_widget)
 
         self.ingredient_inputs = {}
-        ingredient_items = [(code, label, 0.0) for code, label in INGREDIENT_FEATURES]
+        # Используем читаемые имена из utils.constants.ingredient_names
+        ingredient_items = [(code, ingredient_names.get(code, label), 0.0) for code, label in INGREDIENT_FEATURES]
 
         for i, (key, label, default) in enumerate(ingredient_items):
             row = i // 2
@@ -162,7 +163,8 @@ class MainWindow(QMainWindow):
         nutr_layout = QGridLayout()
 
         self.nutrient_inputs = {}
-        nutrient_items = [(feat, feat, 0.0) for feat in NUTRIENT_FEATURES]
+        # Показываем читаемые лейблы нутриентов
+        nutrient_items = [(feat, nutrient_names.get(feat, feat), 0.0) for feat in NUTRIENT_FEATURES]
 
         for i, (key, label, default) in enumerate(nutrient_items):
             nutr_layout.addWidget(QLabel(label + ":"), i, 0)
@@ -389,19 +391,26 @@ class MainWindow(QMainWindow):
                 all_items = list(data.items())
             # Для PDF (полный dict из парсера)
             else:
-                # Составляем таблицу: ингредиенты (имя->%), нутриенты (имя->знач), группы
-                ingr_items = list(data['ingredients'].items())
-                nutr_items = list(data['nutrients'].items())
+                # Составляем таблицу: ингредиенты (код->читаемое имя), нутриенты (Value_i->читаемое имя), группы
+                if data.get('ingredients_by_code'):
+                    ingr_items = [(ingredient_names.get(code, code), v) for code, v in data['ingredients_by_code'].items()]
+                else:
+                    ingr_items = list(data.get('ingredients', {}).items())
+
+                # Нутриенты: конвертируем сырые имена -> Value_i -> читаемое
+                try:
+                    feats = map_nutrients_to_features(data.get('nutrients', {}))
+                    nutr_items = [(nutrient_names.get(k, k), v) for k, v in feats.items()]
+                except Exception:
+                    nutr_items = list(data.get('nutrients', {}).items())
                 ratio_items = [(f"Группа: {k}", v) for k, v in data['ratios'].items()]
                 all_items = ingr_items + nutr_items + ratio_items
 
             self.loading_table.setRowCount(len(all_items))
 
-            # Объединяем названия жирных кислот и ингредиентов
-            acid_names = FATTY_ACID_NAMES
-
             for row, (key, value) in enumerate(all_items):
-                param_name = acid_names.get(key, key)
+                # Для жирных кислот используем словарь имён, иначе уже читаемое имя
+                param_name = FATTY_ACID_NAMES.get(key, key)
                 self.loading_table.setItem(row, 0, QTableWidgetItem(param_name))
                 self.loading_table.setItem(row, 1, QTableWidgetItem(f"{value:.2f}"))
 
@@ -676,20 +685,6 @@ class MainWindow(QMainWindow):
         self.canvas.axes.text(0.5, 0.5, 'Функция трендов в разработке',
                               ha='center', va='center', fontsize=14)
         self.canvas.draw()
-
-    def load_test_data(self):
-        """Загрузка тестовых данных"""
-        try:
-            sample_data = create_sample_data()
-            for diet in sample_data['diets']:
-                try:
-                    self.db.add_diet(**diet)
-                except:
-                    pass
-            QMessageBox.information(self, "Успех", "Тестовые данные загружены!")
-            self.refresh_diets()
-        except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Ошибка загрузки: {str(e)}")
 
 
 def main():

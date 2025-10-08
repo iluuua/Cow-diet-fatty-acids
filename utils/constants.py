@@ -25,8 +25,31 @@ FATTY_ACIDS = [
 # Словарь жирных кислот (ключ -> название)
 FATTY_ACID_NAMES = {key: name for key, name in FATTY_ACIDS}
 
+# Читаемые лейблы для UI (ингредиенты и нутриенты)
+try:
+    # Ингредиенты: код -> человекочитаемое название из filtration.feed_types
+    from preprocessing.filtration import feed_types as _feed_types, NUTRIENT_FEATURES as _NUTRIENT_FEATURES
+    ingredient_names = dict(_feed_types)
 
-
-nutrient_names = [
-
-]
+    # Нутриенты: соответствие Value_i -> человекочитаемое название
+    _NUTRIENT_LABELS = {
+        'Value_0': 'ЧЭЛ 3x NRC',
+        'Value_2': 'СП',
+        'Value_3': 'Крахмал',
+        'Value_4': 'RD Крахмал 3x Уровень 1',
+        'Value_5': 'Сахар',
+        'Value_6': 'НСУ',
+        'Value_8': 'НВУ',
+        'Value_9': 'aNDFom',
+        'Value_10': 'CHO B3 pdNDF',
+        'Value_11': 'Растворимая клетчатка',
+        'Value_13': 'aNDFom фуража',
+        'Value_15': 'peNDF',
+        'Value_16': 'CHO B3 медленная фракция',
+        'Value_17': 'CHO C uNDF',
+    }
+    nutrient_names = {k: _NUTRIENT_LABELS.get(k, k) for k in _NUTRIENT_FEATURES}
+except Exception:
+    # Fallback, если импорт недоступен
+    ingredient_names = {}
+    nutrient_names = {}
