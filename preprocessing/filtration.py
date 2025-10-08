@@ -1,6 +1,6 @@
-# filtration.py
 import re
 
+# Справочник (может дополняться)
 acid_cols = [
     'Масляная', 'Капроновая', 'Каприловая', 'Каприновая', 'Деценовая',
     'Лауриновая', 'Миристиновая', 'Миристолеиновая', 'Пальмитиновая',
@@ -8,15 +8,16 @@ acid_cols = [
     'Линоленовая', 'Арахиновая', 'Бегеновая'
 ]
 
-nutrient_cols = [
+# Ожидаемые названия нутриентов в PDF (человеческие)
+nutrient_cols = [  # первоначальные лейблы нутриентов
     'ЧЭЛ 3x NRC',
     'СП',
-    'Крахмал'
+    'Крахмал',
     'RD Крахмал 3xУровень 1',
     'Сахар',
-    'НСУ' 
-    'НВУ' 
-    'aNDFom' 
+    'НСУ',
+    'НВУ',
+    'aNDFom',
     'CHO B3 pdNDF',
     'Растворимая клетчатка',
     'aNDFom фуража',
@@ -27,6 +28,31 @@ nutrient_cols = [
     'ОЖК',
     'K'
 ]
+
+# Финальные фичи для подачи в модель (как описано в модуле)
+NUTRIENT_FEATURES = [
+    'Value_0', 'Value_2', 'Value_3', 'Value_4',
+    'Value_5', 'Value_6', 'Value_8', 'Value_9', 'Value_10',
+    'Value_11', 'Value_13', 'Value_15', 'Value_16', 'Value_17'
+]
+
+# Маппинг понятных имен нутриентов -> Value_i (в порядке, указанном выше)
+NUTRIENT_TO_FEATURE = {
+    'чэл 3x nrc': 'Value_0',
+    'сп': 'Value_2',
+    'крахмал': 'Value_3',
+    'rd крахмал 3xуровень 1': 'Value_4',
+    'сахар': 'Value_5',
+    'нсу': 'Value_6',
+    'нву': 'Value_8',
+    'andfom': 'Value_9',
+    'cho b3 pdndf': 'Value_10',
+    'растворимая клетчатка': 'Value_11',
+    'andfom фуража': 'Value_13',
+    'pendf': 'Value_15',
+    'cho b3 медленная фракция': 'Value_16',
+    'cho c undf': 'Value_17',
+}
 
 # основной справочник feed_types — дополняйте как нужно
 feed_types = {
@@ -77,6 +103,9 @@ feed_types = {
     '45': 'кальций пропионат',
 }
 
+# Лейблы ингредиентов для UI: (код, название)
+INGREDIENT_FEATURES = sorted(feed_types.items(), key=lambda kv: int(kv[0]))
+
 
 def normalize(s: str) -> str:
     s = (s or '')
@@ -88,13 +117,13 @@ def normalize(s: str) -> str:
 
 def categorize_feed(feed_name: str):
     """
-    Возвращает (code, label) по имени ингредиента. Простая, но расширяемая логика.
+    Определяет (group, code, label) по имени ингредиента/ярлыку.
     """
     s = normalize(feed_name)
     if not s:
-        return None, 'Не определено'
+        return 'other', None, 'Не определено'
 
-    # точные / ключевые слова
+    # Ключевые слова -> коды
     keywords = {
         'патока': '04', 'меласса': '04',
         'шрот соев': '05', 'шрот рапсов': '20', 'шрот подсолнеч': '37',
@@ -107,16 +136,84 @@ def categorize_feed(feed_name: str):
         'премикс': '31', 'поташ': '43', 'концентраты': '44',
         'жмых льнян': '23', 'жмых рапсов': '30', 'фураж': '21'
     }
+    matched_code = None
     for k, code in keywords.items():
         if k in s:
-            return code, feed_types.get(code, code)
+            matched_code = code
+            break
 
     # номер-префикс NN.NN внутри строки -> попытка сопоставить по feed_types
-    m = re.search(r'(\d{2}\.\d{2})', s)
-    if m:
-        pref = m.group(1)
-        for code, label in feed_types.items():
-            if pref in label:
-                return code, label
+    if not matched_code:
+        m = re.search(r'(\d{2}\.\d{2})', s)
+        if m:
+            pref = m.group(1)
+            for code, label in feed_types.items():
+                if pref in label:
+                    matched_code = code
+                    break
 
-    return None, 'Не определено'
+    label = feed_types.get(matched_code, 'Не определено') if matched_code else 'Не определено'
+
+    # Группировка для модельных 4-х компонент
+    group = 'other'
+    norm_label = normalize(label)
+    if 'кукуруз' in s or 'кукуруз' in norm_label:
+        group = 'corn'
+    elif 'соев' in s or 'соев' in norm_label:
+        group = 'soybean'
+    elif 'люцерн' in s or 'люцерн' in norm_label:
+        group = 'alfalfa'
+
+    return group, matched_code, label
+
+
+def map_ingredients_to_codes(ingredients_by_name):
+    """Агрегирует проценты по кодам feed_types из произвольных имен ингредиентов."""
+    result = {code: 0.0 for code in feed_types.keys()}
+    for name, percent in (ingredients_by_name or {}).items():
+        group, code, _label = categorize_feed(name)
+        if code:
+            result[code] = result.get(code, 0.0) + float(percent or 0.0)
+    # удаляем пустые
+    return {code: v for code, v in result.items() if v > 0}
+
+
+def aggregate_ratios(ingredients_by_name):
+    """Суммирует проценты в 4 группы (corn/soybean/alfalfa/other) по исходным именам."""
+    ratios = {'corn': 0.0, 'soybean': 0.0, 'alfalfa': 0.0, 'other': 0.0}
+    for name, percent in (ingredients_by_name or {}).items():
+        group, _code, _label = categorize_feed(name)
+        ratios[group] += float(percent or 0.0)
+    return ratios
+
+
+def aggregate_ratios_from_codes(ingredients_by_code):
+    """Суммирует проценты в 4 группы по кодам feed_types."""
+    ratios = {'corn': 0.0, 'soybean': 0.0, 'alfalfa': 0.0, 'other': 0.0}
+    for code, percent in (ingredients_by_code or {}).items():
+        label = feed_types.get(code)
+        if not label:
+            ratios['other'] += float(percent or 0.0)
+            continue
+        group, _resolved_code, _label = categorize_feed(label)
+        ratios[group] += float(percent or 0.0)
+    return ratios
+
+
+def map_nutrients_to_features(nutrients_by_name):
+    """Маппит нутриенты из PDF к финальным Value_i фичам.
+    Неизвестные — игнорируются.
+    """
+    features = {}
+    for name, value in (nutrients_by_name or {}).items():
+        key = normalize(name)
+        # точное совпадение по словарю
+        if key in NUTRIENT_TO_FEATURE:
+            features[NUTRIENT_TO_FEATURE[key]] = float(value)
+            continue
+        # частичное совпадение по подстроке
+        for pat, feat in NUTRIENT_TO_FEATURE.items():
+            if pat in key:
+                features[feat] = float(value)
+                break
+    return features

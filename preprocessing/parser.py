@@ -12,7 +12,12 @@ try:
 except ImportError:
     OCR_AVAILABLE = False
 
-from preprocessing.filtration import categorize_feed, feed_types
+from preprocessing.filtration import (
+    categorize_feed,
+    feed_types,
+    map_ingredients_to_codes,
+    aggregate_ratios,
+)
 
 def numeric_from_str(s):
     if pd.isna(s):
@@ -149,42 +154,58 @@ def parse_nutrients_from_text(text: str) -> Dict[str, float]:
                     pass
     return nutrients
 
-def parse_pdf_diet(pdf_path: str) -> Dict:
+def parse_pdf_ingredients(pdf_path: str) -> Dict[str, float]:
+    """Парсит только ингредиенты из PDF.
+    Возвращает dict: имя ингредиента -> % СВ.
+    """
     tables = find_tables(pdf_path)
-    all_ingredients = {}
-    all_nutrients = {}
+    ingredients = {}
     if tables:
-        recipe_tables, nutrient_tables = classify_tables(tables)
+        recipe_tables, _nutrient_tables = classify_tables(tables)
         for table in recipe_tables:
-            ingredients = parse_ingredients_table(table)
-            all_ingredients.update(ingredients)
-        for table in nutrient_tables:
-            nutrients = parse_nutrients_table(table)
-            all_nutrients.update(nutrients)
+            ingredients.update(parse_ingredients_table(table))
     else:
         text = ocr_pdf(pdf_path)
         if text:
-            all_ingredients = parse_ingredients_from_text(text)
-            all_nutrients = parse_nutrients_from_text(text)
-        else:
-            print(f"Unable to parse {pdf_path} - no tables or OCR failed.")
-            return {}
+            ingredients = parse_ingredients_from_text(text)
+    return ingredients
 
-    ingred_by_code = {code: 0.0 for code in feed_types.keys()}
-    ratios = {'corn': 0.0, 'soybean': 0.0, 'alfalfa': 0.0, 'other': 0.0}
-    for name, percent in all_ingredients.items():
-        group, code, label = categorize_feed(name)
-        if code:
-            ingred_by_code[code] += percent
-        ratios[group] += percent
+
+def parse_pdf_nutrients(pdf_path: str) -> Dict[str, float]:
+    """Парсит только нутриенты из PDF.
+    Возвращает dict: название нутриента -> значение (в единицах из отчёта).
+    """
+    tables = find_tables(pdf_path)
+    nutrients = {}
+    if tables:
+        _recipe_tables, nutrient_tables = classify_tables(tables)
+        for table in nutrient_tables:
+            nutrients.update(parse_nutrients_table(table))
+    else:
+        text = ocr_pdf(pdf_path)
+        if text:
+            nutrients = parse_nutrients_from_text(text)
+    return nutrients
+
+
+def parse_pdf_diet(pdf_path: str) -> Dict:
+    """Композитная функция: парсит ингредиенты и нутриенты, агрегирует группы.
+    Возвращает dict с ингредиентами, нутриентами, соотношениями и удобными DataFrame.
+    """
+    all_ingredients = parse_pdf_ingredients(pdf_path)
+    all_nutrients = parse_pdf_nutrients(pdf_path)
+
+    # Агрегации
+    ingred_by_code = map_ingredients_to_codes(all_ingredients)
+    ratios = aggregate_ratios(all_ingredients)
 
     pdf_name = Path(pdf_path).name
+    # Удобный DF с ингредиентами по кодам (колонки — лейблы feed_types)
     ration_row = {'pdf': pdf_name}
     codes = sorted(feed_types.keys(), key=int)
     for code in codes:
         label = feed_types[code]
-        ration_row[label + ' % СВ'] = ingred_by_code.get(code, 0.0)
-
+        ration_row[label + ' % СВ'] = float(ingred_by_code.get(code, 0.0))
     ration_df = pd.DataFrame([ration_row])
 
     nutrient_row = {'pdf': pdf_name}
@@ -196,5 +217,10 @@ def parse_pdf_diet(pdf_path: str) -> Dict:
         'nutrient_df': nutrient_df,
         'ingredients': all_ingredients,
         'nutrients': all_nutrients,
+        'ingredients_by_code': ingred_by_code,
         'ratios': ratios
     }
+
+
+ 
+

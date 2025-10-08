@@ -4,8 +4,8 @@
 Конвертировано из Streamlit в PyQt6
 """
 
-import sys
 import os
+import sys
 
 # Принудительно устанавливаем платформу Qt
 os.environ['QT_QPA_PLATFORM'] = 'xcb'
@@ -15,7 +15,6 @@ if sys.platform == 'darwin':
 from PyQt6.QtWidgets import *
 from PyQt6.QtCore import *
 from PyQt6.QtGui import *
-import pandas as pd
 import numpy as np
 import matplotlib
 
@@ -25,11 +24,15 @@ from matplotlib.figure import Figure
 
 from datetime import datetime
 from database import DatabaseManager
-from utils import validate_diet_ratios, check_fatty_acid_ranges, generate_recommendations, format_percentage, create_summary_statistics
-from export import export_analysis_to_excel
-from preprocessing import prepare_data, parse_excel_fatty_acids, parse_pdf_diet
+from utils import validate_diet_ratios
+from utils.constants import FATTY_ACID_NAMES
+from preprocessing import (
+    parse_pdf_diet,
+    INGREDIENT_FEATURES,
+    NUTRIENT_FEATURES,
+    map_nutrients_to_features,
+)
 from parameters.model import MilkFattyAcidPredictor, create_sample_data
-from utils.constants import FATTY_ACIDS, FATTY_ACID_NAMES, INGREDIENTS, INGREDIENT_NAMES
 
 
 class MplCanvas(FigureCanvasQTAgg):
@@ -104,10 +107,6 @@ class MainWindow(QMainWindow):
         file_group = QGroupBox("Загрузка файлов")
         file_layout = QVBoxLayout()
 
-        excel_btn = QPushButton("Загрузить Excel файл")
-        excel_btn.clicked.connect(self.load_excel)
-        file_layout.addWidget(excel_btn)
-
         pdf_btn = QPushButton("Загрузить PDF файл")
         pdf_btn.clicked.connect(self.load_pdf)
         file_layout.addWidget(pdf_btn)
@@ -134,12 +133,12 @@ class MainWindow(QMainWindow):
         ingr_layout = QGridLayout(ingr_widget)
 
         self.ingredient_inputs = {}
-        ingredient_items = [(key, name, 0.0) for key, name in INGREDIENTS]
+        ingredient_items = [(code, label, 0.0) for code, label in INGREDIENT_FEATURES]
 
         for i, (key, label, default) in enumerate(ingredient_items):
             row = i // 2
             col = (i % 2) * 2
-            ingr_layout.addWidget(QLabel(label + ":"), row, col)
+            ingr_layout.addWidget(QLabel(f"{label} (% СВ):"), row, col)
             spin = QDoubleSpinBox()
             spin.setRange(0, 100)
             spin.setValue(default)
@@ -158,20 +157,17 @@ class MainWindow(QMainWindow):
         ingr_group.setLayout(ingr_group_layout)
         manual_layout.addWidget(ingr_group)
 
-        # Нутриенты
-        nutr_group = QGroupBox("Нутриенты")
+        # Нутриенты (Value_i признаки)
+        nutr_group = QGroupBox("Нутриенты (фичи модели)")
         nutr_layout = QGridLayout()
 
         self.nutrient_inputs = {}
-        nutrient_items = [
-            ("protein", "Протеин (г)", 0.0), ("fat", "Жиры (г)", 0.0),
-            ("carbs", "Углеводы (г)", 0.0), ("fiber", "Клетчатка (г)", 0.0)
-        ]
+        nutrient_items = [(feat, feat, 0.0) for feat in NUTRIENT_FEATURES]
 
         for i, (key, label, default) in enumerate(nutrient_items):
             nutr_layout.addWidget(QLabel(label + ":"), i, 0)
             spin = QDoubleSpinBox()
-            spin.setRange(0, 1000)
+            spin.setRange(0, 10000)
             spin.setValue(default)
             self.nutrient_inputs[key] = spin
             nutr_layout.addWidget(spin, i, 1)
@@ -354,22 +350,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(test_btn)
 
     # Обработчики событий
-    def load_excel(self):
-        """Загрузка Excel файла"""
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "Выберите Excel файл", "", "Excel files (*.xlsx *.xls)"
-        )
-        if file_path:
-            try:
-                data = parse_excel_fatty_acids(file_path)
-
-                # Отображаем результаты парсинга
-                self.display_loading_results(data, "Excel")
-
-                QMessageBox.information(self, "Успех", "Excel файл успешно загружен!")
-            except Exception as e:
-                QMessageBox.critical(self, "Ошибка", f"Ошибка загрузки: {str(e)}")
-
     def load_pdf(self):
         """Загрузка PDF файла"""
         file_path, _ = QFileDialog.getOpenFileName(
@@ -379,10 +359,15 @@ class MainWindow(QMainWindow):
             try:
                 full_data = parse_pdf_diet(file_path)
 
-                # Заполняем поля предсказаний аггрегированными ratios
+                # Заполняем поля 4 группами
                 for key, value in full_data['ratios'].items():
                     if key in self.pred_inputs:
                         self.pred_inputs[key].setValue(value)
+
+                # Также в форму ингредиентов по кодам
+                for code, value in full_data.get('ingredients_by_code', {}).items():
+                    if code in self.ingredient_inputs:
+                        self.ingredient_inputs[code].setValue(value)
 
                 # Отображаем результаты парсинга
                 self.display_loading_results(full_data, "PDF")
@@ -404,14 +389,16 @@ class MainWindow(QMainWindow):
                 all_items = list(data.items())
             # Для PDF (полный dict из парсера)
             else:
-                all_items = list(data['ingredients'].items()) + list(data['nutrients'].items()) + [(f"Группа: {k}", v)
-                                                                                                   for k, v in data[
-                                                                                                       'ratios'].items()]
+                # Составляем таблицу: ингредиенты (имя->%), нутриенты (имя->знач), группы
+                ingr_items = list(data['ingredients'].items())
+                nutr_items = list(data['nutrients'].items())
+                ratio_items = [(f"Группа: {k}", v) for k, v in data['ratios'].items()]
+                all_items = ingr_items + nutr_items + ratio_items
 
             self.loading_table.setRowCount(len(all_items))
 
             # Объединяем названия жирных кислот и ингредиентов
-            acid_names = {**FATTY_ACID_NAMES, **INGREDIENT_NAMES}
+            acid_names = FATTY_ACID_NAMES
 
             for row, (key, value) in enumerate(all_items):
                 param_name = acid_names.get(key, key)
@@ -437,16 +424,17 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Ошибка валидации", message)
                 return
 
-            # Сохранение рациона в БД (совместимость со старой схемой)
-            # Суммируем все ингредиенты в старые поля для обратной совместимости
-            total = sum(self.current_diet_data.values())
+            # Сохранение рациона в БД (4 группы)
+            # Преобразуем введённые кодовые ингредиенты -> группы через простую эвристику по label
+            from preprocessing import feed_types, aggregate_ratios_from_codes
+            entered_codes = {code: val for code, val in self.current_diet_data.items() if val > 0}
+            ratios = aggregate_ratios_from_codes(entered_codes)
             diet_id = self.db.add_diet(
                 name=self.diet_name.text(),
-                corn_ratio=self.current_diet_data.get('forage', 0) + self.current_diet_data.get('concentrates', 0),
-                soybean_ratio=self.current_diet_data.get('flax_meal', 0) + self.current_diet_data.get('yeast', 0),
-                alfalfa_ratio=self.current_diet_data.get('dry_grains', 0),
-                other_ratio=self.current_diet_data.get('premix_milk', 0) + self.current_diet_data.get('chalk', 0) +
-                            self.current_diet_data.get('salt', 0) + self.current_diet_data.get('potash', 0)
+                corn_ratio=ratios.get('corn', 0.0),
+                soybean_ratio=ratios.get('soybean', 0.0),
+                alfalfa_ratio=ratios.get('alfalfa', 0.0),
+                other_ratio=ratios.get('other', 0.0)
             )
 
             # Сохраняем diet_id для использования в предсказаниях
