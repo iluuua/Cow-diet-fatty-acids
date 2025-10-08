@@ -1,6 +1,7 @@
 import numpy as np
 from typing import Dict, List
 from pathlib import Path
+import os
 
 try:
     import joblib
@@ -17,7 +18,7 @@ from preprocessing import prepare_nutrients_df
 from preprocessing.filtration import NUTRIENT_FEATURES
 
 
-PARAMETERS_DIR = Path(__file__).resolve().parent.parent / 'parameters'
+PARAMETERS_DIR = Path(os.getenv('COW_FATTY_PARAMETERS_DIR') or (Path(__file__).resolve().parent.parent / 'parameters'))
 
 
 def _find_nutrient_bundle_files() -> List[Path]:
@@ -26,6 +27,14 @@ def _find_nutrient_bundle_files() -> List[Path]:
     for pattern in patterns:
         found.extend(PARAMETERS_DIR.glob(pattern))
     found.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    if not found:
+        print(f"⚠️ В папке {PARAMETERS_DIR} не найдено файлов по маскам: {patterns}")
+    else:
+        try:
+            listing = ", ".join(str(p) for p in found[:5])
+        except Exception:
+            listing = ""
+        print(f"ℹ️ Найдены кандидаты для нутриентной модели: {listing}")
     return found
 
 
@@ -41,7 +50,8 @@ def _load_nutrient_assets():
                 scaler_y = bundle.get('scaler_y', None)
                 return model, scaler_X, scaler_y
             return bundle, None, None
-        except Exception:
+        except Exception as e:
+            print(f"⚠️ Ошибка загрузки файла нутриентной модели: {file_path}: {e}")
             continue
     print(f"❌ Не удалось загрузить ни один файл модели нутриентов из: {PARAMETERS_DIR}")
     return None, None, None

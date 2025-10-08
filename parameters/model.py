@@ -2,6 +2,7 @@ import joblib
 import pandas as pd
 from typing import Dict, Tuple
 from pathlib import Path
+import os
 
 
 class MilkFattyAcidPredictor:
@@ -10,10 +11,22 @@ class MilkFattyAcidPredictor:
     """
 
     def __init__(self, model_path="best_models.pkl"):
-        # если передан относительный путь по умолчанию, ищем файл в папке parameters
+        # Разрешение пути к весам с учётом ENV и локальной папки parameters
         if model_path == "best_models.pkl":
+            env_dir = os.getenv("COW_FATTY_PARAMETERS_DIR")
+            if env_dir:
+                env_candidate = Path(env_dir) / model_path
+                if env_candidate.exists():
+                    model_path = str(env_candidate)
+                else:
+                    base_dir = Path(__file__).resolve().parent  # .../parameters
+                    model_path = str(base_dir / model_path)
+            else:
+                base_dir = Path(__file__).resolve().parent  # .../parameters
+                model_path = str(base_dir / model_path)
+        elif not Path(model_path).is_absolute():
             base_dir = Path(__file__).resolve().parent  # .../parameters
-            model_path = str(base_dir / model_path)
+            model_path = str((base_dir / model_path))
         self.model_path = model_path
         self.model = None
         self.model_params = None
@@ -21,15 +34,19 @@ class MilkFattyAcidPredictor:
 
     def load_model(self):
         """Загрузка сохранённой модели через joblib"""
-        import os
         if not os.path.exists(self.model_path):
+            print(f"⚠️ Файл модели не найден: {self.model_path}")
             # мягкий фолбэк: инициализируем пустую модель, чтобы приложение продолжило работу
             self.model = DummyModel()
             self.model_params = {}
             return
-
-        best_models = joblib.load(self.model_path)
-        self.model, self.model_params = best_models['XGBoost']
+        try:
+            best_models = joblib.load(self.model_path)
+            self.model, self.model_params = best_models['XGBoost']
+        except Exception as e:
+            print(f"❌ Ошибка загрузки модели: {e}")
+            self.model = DummyModel()
+            self.model_params = {}
 
     def validate_input(self, diet_ratios: Dict[str, float]) -> Tuple[bool, str]:
         """Простейшая валидация входных данных"""

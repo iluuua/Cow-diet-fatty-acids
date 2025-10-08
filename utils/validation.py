@@ -3,9 +3,7 @@ from typing import Dict, Tuple
 
 
 def validate_diet_ratios(ratios: Dict[str, float]) -> Tuple[bool, str]:
-    total = sum(ratios.values())
-    if abs(total - 100.0) > 5.0:
-        return False, f"Соотношения рациона суммируются до {total:.1f}%, должны быть близки к 100%"
+    # Разрешаем любую сумму процентов; проверяем только на неотрицательность
     if any(ratio < 0 for ratio in ratios.values()):
         return False, "Все соотношения должны быть положительными"
     return True, "Соотношения рациона корректны"

@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Dict, List
 
 import numpy as np
+import os
 
 from preprocessing import prepare_ingredients_df
 
@@ -17,7 +18,7 @@ except Exception:
     pass
 
 
-PARAMETERS_DIR = Path(__file__).resolve().parent.parent / 'parameters'
+PARAMETERS_DIR = Path(os.getenv('COW_FATTY_PARAMETERS_DIR') or (Path(__file__).resolve().parent.parent / 'parameters'))
 
 
 def _find_ingredient_model_files() -> List[Path]:
