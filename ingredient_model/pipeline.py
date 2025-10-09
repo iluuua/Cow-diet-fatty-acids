@@ -73,15 +73,44 @@ def predict_from_ingredients(ingredients_by_name: Dict[str, float]) -> Dict[str,
     """Предсказывает кислоты из состава ингредиентов.
     Если модель не загружена, возвращает нули по целям.
     """
+    global INGR_MODEL
     # Готовим DataFrame входов
     X_df = prepare_ingredients_df(ingredients_by_name)
+    # Попробуем подогнать порядок и состав фич под модель
+    def _align_features(df, model):
+        try:
+            names = getattr(model, 'feature_names_in_', None)
+            if names is None and hasattr(model, 'estimator_'):
+                names = getattr(model.estimator_, 'feature_names_in_', None)
+            if names is None and hasattr(model, 'regressor_'):
+                names = getattr(model.regressor_, 'feature_names_in_', None)
+            if names is None:
+                # XGBoost sklearn API может хранить имена в booster
+                get_booster = getattr(model, 'get_booster', None)
+                if callable(get_booster):
+                    booster = get_booster()
+                    if hasattr(booster, 'feature_names') and booster.feature_names:
+                        names = booster.feature_names
+            if names is not None:
+                names = list(names)
+                overlap = len(set(names) & set(df.columns))
+                # Выравниваем только если есть заметное пересечение имён
+                if overlap >= max(1, int(0.33 * len(names))):
+                    for col in names:
+                        if col not in df.columns:
+                            df[col] = 0.0
+                    df = df[names]
+        except Exception:
+            pass
+        return df
 
     # Если модель не загружена — пробуем подгрузить лениво
-    global INGR_MODEL
     if INGR_MODEL is None:
         INGR_MODEL = _load_ingredient_model()
         if INGR_MODEL is None:
             return {k: 0.0 for k in ['lauric', 'palmitic', 'stearic', 'oleic', 'linoleic', 'linolenic']}
+
+    X_df = _align_features(X_df, INGR_MODEL)
 
     try:
         y = INGR_MODEL.predict(X_df)

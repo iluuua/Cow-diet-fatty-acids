@@ -68,7 +68,27 @@ def predict_from_nutrients(nutrients_by_name: Dict[str, float]) -> Dict[str, flo
     Если модель или скейлеры не загружены — вернём нули.
     """
     X_df = prepare_nutrients_df(nutrients_by_name)
-    X_df = X_df[[c for c in NUTRIENT_FEATURES if c in X_df.columns]]
+    # Выравнивание набора фич под модель, если она ожидает строгий порядок
+    def _align_features(df, model):
+        try:
+            names = getattr(model, 'feature_names_in_', None)
+            if names is None and hasattr(model, 'estimator_'):
+                names = getattr(model.estimator_, 'feature_names_in_', None)
+            if names is None and hasattr(model, 'regressor_'):
+                names = getattr(model.regressor_, 'feature_names_in_', None)
+            if names is not None:
+                names = list(names)
+                for col in names:
+                    if col not in df.columns:
+                        df[col] = 0.0
+                df = df[names]
+            else:
+                df = df[[c for c in NUTRIENT_FEATURES if c in df.columns]]
+        except Exception:
+            df = df[[c for c in NUTRIENT_FEATURES if c in df.columns]]
+        return df
+
+    X_df = _align_features(X_df, N_MODEL)
 
     if N_MODEL is None:
         return {k: 0.0 for k in ['lauric', 'palmitic', 'stearic', 'oleic', 'linoleic', 'linolenic']}
