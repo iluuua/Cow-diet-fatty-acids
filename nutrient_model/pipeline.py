@@ -8,11 +8,19 @@ try:
 except Exception:
     joblib = None
 try:
+    from skops.io import load as skops_load
+except Exception:
+    skops_load = None
+try:
     import warnings
     from sklearn.exceptions import InconsistentVersionWarning
     warnings.filterwarnings("ignore", category=InconsistentVersionWarning)
 except Exception:
     pass
+try:
+    import sklearn  # для логирования версии
+except Exception:
+    sklearn = None
 
 from preprocessing import prepare_nutrients_df
 from preprocessing.filtration import NUTRIENT_FEATURES
@@ -22,7 +30,7 @@ PARAMETERS_DIR = Path(os.getenv('COW_FATTY_PARAMETERS_DIR') or (Path(__file__).r
 
 
 def _find_nutrient_bundle_files() -> List[Path]:
-    patterns = ['nutrients-_acids*.pkl', 'nutrients-_acids*.joblib']
+    patterns = ['nutrients-_acids*.pkl', 'nutrients-_acids*.joblib', 'nutrients-_acids*.skops', 'nutrients*.skops']
     found: List[Path] = []
     for pattern in patterns:
         found.extend(PARAMETERS_DIR.glob(pattern))
@@ -41,9 +49,20 @@ def _find_nutrient_bundle_files() -> List[Path]:
 def _load_nutrient_assets():
     if joblib is None:
         return None, None, None
+    if sklearn is not None:
+        try:
+            print(f"ℹ️ Используется scikit-learn версии: {sklearn.__version__}")
+        except Exception:
+            pass
     for file_path in _find_nutrient_bundle_files():
         try:
-            bundle = joblib.load(str(file_path))
+            if file_path.suffix == '.skops':
+                if skops_load is None:
+                    print(f"⚠️ Skops не установлен, пропускаю файл: {file_path}")
+                    continue
+                bundle = skops_load(str(file_path), trusted=True)
+            else:
+                bundle = joblib.load(str(file_path))
             if isinstance(bundle, dict):
                 model = bundle.get('model', None)
                 scaler_X = bundle.get('scaler_X', None)

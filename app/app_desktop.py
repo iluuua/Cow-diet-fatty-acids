@@ -49,6 +49,22 @@ class MplCanvas(FigureCanvasQTAgg):
         super().__init__(fig)
 
 
+class ClickableLabel(QLabel):
+    """QLabel с сигналом клика по изображению"""
+
+    clicked = pyqtSignal(str)
+
+    def __init__(self, image_path: str, parent=None):
+        super().__init__(parent)
+        self.image_path = image_path
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit(self.image_path)
+        super().mousePressEvent(event)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -63,6 +79,10 @@ class MainWindow(QMainWindow):
         # Хранилище для предсказаний и ID рациона
         self.current_predictions = {}
         self.current_diet_id = None
+
+        # Путь к папке с заготовленными графиками
+        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+        self.visuals_dir = os.path.join(base_dir, 'visuals')
 
         self.init_ui()
 
@@ -96,6 +116,9 @@ class MainWindow(QMainWindow):
 
         # Статус бар
         self.statusBar().showMessage("Готов к работе")
+
+        # Автозагрузка изображений при переключении на вкладку результатов
+        self.tabs.currentChanged.connect(self.on_tab_changed)
 
     def create_loading_tab(self):
         """Вкладка загрузки данных"""
@@ -264,7 +287,7 @@ class MainWindow(QMainWindow):
     def create_results_tab(self):
         """Вкладка управления результатами"""
         tab = QWidget()
-        self.tabs.addTab(tab, "Управление результатами")
+        self.results_tab_index = self.tabs.addTab(tab, "Управление результатами")
 
         layout = QVBoxLayout(tab)
 
@@ -300,8 +323,8 @@ class MainWindow(QMainWindow):
         results_group.setLayout(results_layout)
         layout.addWidget(results_group)
 
-        # График
-        graph_group = QGroupBox("Графики")
+        # Готовые графики
+        graph_group = QGroupBox("")
         graph_layout = QVBoxLayout()
 
         # Кнопки для графиков
@@ -321,6 +344,33 @@ class MainWindow(QMainWindow):
 
         graph_group.setLayout(graph_layout)
         layout.addWidget(graph_group)
+
+        # Галерея
+        prepared_group = QGroupBox("Графики")
+        prepared_layout = QVBoxLayout()
+
+        prepared_btns = QHBoxLayout()
+        refresh_btn = QPushButton("Обновить список")
+        refresh_btn.clicked.connect(self.load_prepared_images)
+        prepared_btns.addWidget(refresh_btn)
+        prepared_btns.addStretch()
+        prepared_layout.addLayout(prepared_btns)
+
+        self.prepared_scroll = QScrollArea()
+        self.prepared_scroll.setWidgetResizable(True)
+        self.prepared_container = QWidget()
+        self.prepared_grid = QGridLayout(self.prepared_container)
+        self.prepared_grid.setContentsMargins(6, 6, 6, 6)
+        self.prepared_grid.setHorizontalSpacing(12)
+        self.prepared_grid.setVerticalSpacing(12)
+        self.prepared_scroll.setWidget(self.prepared_container)
+        prepared_layout.addWidget(self.prepared_scroll)
+
+        prepared_group.setLayout(prepared_layout)
+        layout.addWidget(prepared_group)
+
+        # Первая загрузка миниатюр
+        self.load_prepared_images()
 
     def create_about_tab(self):
         """Вкладка о программе"""
@@ -757,6 +807,146 @@ class MainWindow(QMainWindow):
         self.canvas.axes.text(0.5, 0.5, 'Функция трендов в разработке',
                               ha='center', va='center', fontsize=14)
         self.canvas.draw()
+
+    # -------------------- Галерея заготовленных графиков --------------------
+    def on_tab_changed(self, index: int):
+        """Автоматически обновлять миниатюры при входе во вкладку результатов."""
+        try:
+            if hasattr(self, 'results_tab_index') and index == self.results_tab_index:
+                self.load_prepared_images()
+        except Exception:
+            pass
+
+    def clear_prepared_grid(self):
+        """Очистка сетки миниатюр."""
+        try:
+            while self.prepared_grid.count():
+                item = self.prepared_grid.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.setParent(None)
+                    widget.deleteLater()
+        except Exception:
+            pass
+
+    def load_prepared_images(self):
+        """Загрузка изображений из папки visuals и отображение миниатюр."""
+        try:
+            # Если секция ещё не инициализирована (например, вкладка не создана)
+            if not hasattr(self, 'prepared_grid'):
+                return
+
+            self.clear_prepared_grid()
+
+            if not os.path.isdir(self.visuals_dir):
+                placeholder = QLabel("Папка с графиками не найдена: " + self.visuals_dir)
+                placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.prepared_grid.addWidget(placeholder, 0, 0)
+                return
+
+            entries = sorted(os.listdir(self.visuals_dir))
+            image_exts = {'.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif'}
+            image_paths = [
+                os.path.join(self.visuals_dir, name)
+                for name in entries
+                if os.path.splitext(name)[1].lower() in image_exts
+            ]
+
+            if not image_paths:
+                placeholder = QLabel("Нет изображений в папке visuals")
+                placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.prepared_grid.addWidget(placeholder, 0, 0)
+                return
+
+            columns = 3
+            row = 0
+            col = 0
+            thumb_max_w, thumb_max_h = 320, 220
+
+            for path in image_paths:
+                # Контейнер одного элемента
+                item_widget = QWidget()
+                vbox = QVBoxLayout(item_widget)
+                vbox.setContentsMargins(6, 6, 6, 6)
+                vbox.setSpacing(6)
+
+                pixmap = QPixmap(path)
+                if not pixmap.isNull():
+                    scaled = pixmap.scaled(
+                        thumb_max_w, thumb_max_h,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation
+                    )
+                    img_label = ClickableLabel(path)
+                    img_label.setPixmap(scaled)
+                    img_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                    img_label.clicked.connect(self.open_image_viewer)
+                    vbox.addWidget(img_label)
+                else:
+                    broken = QLabel("Не удалось загрузить изображение")
+                    broken.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                    vbox.addWidget(broken)
+
+                name_label = QLabel(os.path.basename(path))
+                name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                name_label.setWordWrap(True)
+                vbox.addWidget(name_label)
+
+                self.prepared_grid.addWidget(item_widget, row, col)
+                col += 1
+                if col >= columns:
+                    col = 0
+                    row += 1
+
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Ошибка загрузки изображений: {str(e)}")
+
+    def open_image_viewer(self, image_path: str):
+        """Открыть диалог с полноразмерным просмотром изображения."""
+        try:
+            dialog = QDialog(self)
+            dialog.setWindowTitle(os.path.basename(image_path))
+            dialog.resize(1000, 700)
+
+            layout = QVBoxLayout(dialog)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+
+            container = QWidget()
+            v = QVBoxLayout(container)
+            v.setContentsMargins(0, 0, 0, 0)
+            v.setSpacing(0)
+
+            lbl = QLabel()
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            pm = QPixmap(image_path)
+            if pm.isNull():
+                lbl.setText("Не удалось загрузить изображение")
+            else:
+                # Подгоняем под текущее окно при открытии
+                area_w = dialog.width() - 40
+                area_h = dialog.height() - 60
+                scaled = pm.scaled(
+                    max(100, area_w), max(100, area_h),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation
+                )
+                lbl.setPixmap(scaled)
+
+            v.addWidget(lbl)
+            scroll.setWidget(container)
+            layout.addWidget(scroll)
+
+            btn_box = QHBoxLayout()
+            close_btn = QPushButton("Закрыть")
+            close_btn.clicked.connect(dialog.accept)
+            btn_box.addStretch()
+            btn_box.addWidget(close_btn)
+            layout.addLayout(btn_box)
+
+            dialog.exec()
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Ошибка просмотра изображения: {str(e)}")
 
 
 def main():
