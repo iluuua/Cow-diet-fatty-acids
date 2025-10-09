@@ -35,7 +35,6 @@ class MilkFattyAcidPredictor:
     def load_model(self):
         """Загрузка сохранённой модели через joblib"""
         if not os.path.exists(self.model_path):
-            print(f"⚠️ Файл модели не найден: {self.model_path}")
             # мягкий фолбэк: инициализируем пустую модель, чтобы приложение продолжило работу
             self.model = DummyModel()
             self.model_params = {}
@@ -44,7 +43,6 @@ class MilkFattyAcidPredictor:
             best_models = joblib.load(self.model_path)
             self.model, self.model_params = best_models['XGBoost']
         except Exception as e:
-            print(f"❌ Ошибка загрузки модели: {e}")
             self.model = DummyModel()
             self.model_params = {}
 

@@ -31,9 +31,11 @@ from utils import validate_diet_ratios
 from utils.constants import FATTY_ACID_NAMES, ingredient_names, nutrient_names
 from preprocessing import (
     parse_pdf_diet,
-    INGREDIENT_FEATURES,
+    ingredient_cols,
     NUTRIENT_FEATURES,
     map_nutrients_to_features,
+    prepare_ratios,
+    CODE_TO_UI_LABEL,
 )
 from parameters.model import MilkFattyAcidPredictor
 from ingredient_model.pipeline import predict_from_ingredients
@@ -161,10 +163,10 @@ class MainWindow(QMainWindow):
         ingr_layout = QGridLayout(ingr_widget)
 
         self.ingredient_inputs = {}
-        # Используем читаемые имена из utils.constants.ingredient_names
-        ingredient_items = [(code, ingredient_names.get(code, label), 0.0) for code, label in INGREDIENT_FEATURES]
+        # Лейблы ингредиентов из filtration.ingredient_cols
+        ingredient_items = [(label, 0.0) for label in ingredient_cols]
 
-        for i, (key, label, default) in enumerate(ingredient_items):
+        for i, (label, default) in enumerate(ingredient_items):
             row = i // 2
             col = (i % 2) * 2
             ingr_layout.addWidget(QLabel(f"{label} (% СВ):"), row, col)
@@ -174,7 +176,7 @@ class MainWindow(QMainWindow):
             spin.setSuffix(" %")
             spin.setMinimumWidth(120)
             spin.setMaximumWidth(150)
-            self.ingredient_inputs[key] = spin
+            self.ingredient_inputs[label] = spin
             ingr_layout.addWidget(spin, row, col + 1)
 
         ingr_scroll.setWidget(ingr_widget)
@@ -243,26 +245,6 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(tab, "Предсказания")
 
         layout = QVBoxLayout(tab)
-
-        # Параметры
-        params_group = QGroupBox("Параметры рациона")
-        params_layout = QGridLayout()
-
-        self.pred_inputs = {}
-        diet_items = [("corn", "Кукуруза", 40.0), ("soybean", "Соя", 25.0),
-                      ("alfalfa", "Люцерна", 25.0), ("other", "Прочее", 10.0)]
-
-        for i, (key, label, default) in enumerate(diet_items):
-            params_layout.addWidget(QLabel(label + " (%):"), i, 0)
-            spin = QDoubleSpinBox()
-            spin.setRange(0, 100)
-            spin.setValue(default)
-            spin.setSuffix("%")
-            self.pred_inputs[key] = spin
-            params_layout.addWidget(spin, i, 1)
-
-        params_group.setLayout(params_layout)
-        layout.addWidget(params_group)
 
         # Кнопка
         pred_btn = QPushButton("Сгенерировать предсказания")
@@ -416,15 +398,27 @@ class MainWindow(QMainWindow):
             try:
                 full_data = parse_pdf_diet(file_path)
 
-                # Заполняем поля 4 группами
-                for key, value in full_data['ratios'].items():
-                    if key in self.pred_inputs:
-                        self.pred_inputs[key].setValue(value)
+                # Заполняем форму ингредиентов по лейблам (в приоритете по кодам -> лейблам)
+                ingredients_by_label = {}
+                if full_data.get('ingredients_by_code'):
+                    for code, val in full_data['ingredients_by_code'].items():
+                        label = CODE_TO_UI_LABEL.get(code, ingredient_names.get(code, code))
+                        ingredients_by_label[label] = val
+                else:
+                    ingredients_by_label = full_data.get('ingredients', {})
+                for label, value in ingredients_by_label.items():
+                    if label in self.ingredient_inputs:
+                        self.ingredient_inputs[label].setValue(value)
 
-                # Также в форму ингредиентов по кодам
-                for code, value in full_data.get('ingredients_by_code', {}).items():
-                    if code in self.ingredient_inputs:
-                        self.ingredient_inputs[code].setValue(value)
+                # Заполняем форму нутриентов из распарсенных значений, если возможно
+                nutrients_by_name = full_data.get('nutrients', {})
+                try:
+                    feat_map = map_nutrients_to_features(nutrients_by_name)
+                    for feat_key, spin in self.nutrient_inputs.items():
+                        if feat_key in feat_map:
+                            spin.setValue(float(feat_map[feat_key]))
+                except Exception:
+                    pass
 
                 # Отображаем результаты парсинга
                 self.display_loading_results(full_data, "PDF")
@@ -444,26 +438,23 @@ class MainWindow(QMainWindow):
             # Название рациона
             self.diet_name.setText("Тестовый рацион")
 
-            # Параметры рациона (группы)
-            defaults = {"corn": 40.0, "soybean": 25.0, "alfalfa": 25.0, "other": 10.0}
-            for key, spin in self.pred_inputs.items():
-                spin.setValue(defaults.get(key, 0.0))
+            # Параметры рациона (группы) считаются автоматически из ингредиентов
 
-            # Ингредиенты по кодам: заполним несколько первых как пример
-            sample_ingr_by_code = {}
-            for idx, (code, _label) in enumerate(INGREDIENT_FEATURES):
+            # Ингредиенты по лейблам: заполним несколько первых как пример
+            sample_ingr_by_label = {}
+            for idx, label in enumerate(ingredient_cols):
                 if idx == 0:
-                    sample_ingr_by_code[code] = 35.0
+                    sample_ingr_by_label[label] = 35.0
                 elif idx == 1:
-                    sample_ingr_by_code[code] = 20.0
+                    sample_ingr_by_label[label] = 20.0
                 elif idx == 2:
-                    sample_ingr_by_code[code] = 15.0
+                    sample_ingr_by_label[label] = 15.0
                 elif idx == 3:
-                    sample_ingr_by_code[code] = 10.0
+                    sample_ingr_by_label[label] = 10.0
                 else:
                     break
-            for code, spin in self.ingredient_inputs.items():
-                spin.setValue(sample_ingr_by_code.get(code, 0.0))
+            for label, spin in self.ingredient_inputs.items():
+                spin.setValue(sample_ingr_by_label.get(label, 0.0))
 
             # Нутриенты (Value_i): заполним первые несколько
             sample_nutrients = {}
@@ -477,9 +468,9 @@ class MainWindow(QMainWindow):
 
             # Отобразим собранные данные в таблице результатов загрузки
             data = {
-                'ingredients_by_code': sample_ingr_by_code,
+                'ingredients': sample_ingr_by_label,
                 'nutrients': sample_nutrients,
-                'ratios': defaults,
+                'ratios': prepare_ratios(sample_ingr_by_label),
             }
             self.display_loading_results(data, "TEST")
             QMessageBox.information(self, "Успех", "Загружены тестовые данные.")
@@ -527,7 +518,7 @@ class MainWindow(QMainWindow):
         """Сохранение данных из вкладки загрузки"""
         try:
             # Сбор данных из ингредиентов и нутриентов
-            self.current_diet_data = {k: v.value() for k, v in self.ingredient_inputs.items()}
+            self.current_diet_data = {label: spin.value() for label, spin in self.ingredient_inputs.items()}
             nutrients_data = {k: v.value() for k, v in self.nutrient_inputs.items()}
 
             # Валидация рациона
@@ -536,11 +527,9 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Ошибка валидации", message)
                 return
 
-            # Сохранение рациона в БД (4 группы)
-            # Преобразуем введённые кодовые ингредиенты -> группы через простую эвристику по label
-            from preprocessing import feed_types, aggregate_ratios_from_codes
-            entered_codes = {code: val for code, val in self.current_diet_data.items() if val > 0}
-            ratios = aggregate_ratios_from_codes(entered_codes)
+            # Сохранение рациона в БД (4 группы), считаем по введённым лейблам
+            entered_labels = {label: val for label, val in self.current_diet_data.items() if val > 0}
+            ratios = prepare_ratios(entered_labels)
             diet_id = self.db.add_diet(
                 name=self.diet_name.text(),
                 corn_ratio=ratios.get('corn', 0.0),
@@ -565,7 +554,9 @@ class MainWindow(QMainWindow):
     def generate_predictions(self):
         """Генерация предсказаний"""
         try:
-            diet_ratios = {k: v.value() for k, v in self.pred_inputs.items()}
+            # Считаем группы из введённых ингредиентов (лейблы)
+            ingredients_by_label = {label: spin.value() for label, spin in self.ingredient_inputs.items() if spin.value() > 0}
+            diet_ratios = prepare_ratios(ingredients_by_label)
 
             is_valid, message = self.model.validate_input(diet_ratios)
             if not is_valid:
@@ -573,11 +564,8 @@ class MainWindow(QMainWindow):
                 return
 
             # Собираем входы для двух пайплайнов
-            # 1) По ингредиентам: возьмём введённые пользователем коды с ненулевыми значениями
-            ingredients_by_code = {code: spin.value() for code, spin in self.ingredient_inputs.items() if spin.value() > 0}
-            # Для модели ингредиентов нужен маппинг имя->%, у нас коды. Сконвертируем к именам (лейблам) из feed_types.
-            from preprocessing import feed_types
-            ingredients_by_name = {feed_types.get(code, code): val for code, val in ingredients_by_code.items()}
+            # 1) По ингредиентам: берём введённые пользователем лейблы с ненулевыми значениями
+            ingredients_by_name = ingredients_by_label
 
             # 2) По нутриентам: соберём Value_i
             nutrients_by_feat = {k: v.value() for k, v in self.nutrient_inputs.items() if v.value() > 0}

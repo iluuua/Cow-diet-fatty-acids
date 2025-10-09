@@ -22,8 +22,7 @@ try:
 except Exception:
     sklearn = None
 
-from preprocessing import prepare_nutrients_df
-from preprocessing.filtration import NUTRIENT_FEATURES
+from preprocessing import prepare_nutrients_df, NUTRIENT_FEATURES
 
 
 PARAMETERS_DIR = Path(os.getenv('COW_FATTY_PARAMETERS_DIR') or (Path(__file__).resolve().parent.parent / 'parameters'))
@@ -35,30 +34,17 @@ def _find_nutrient_bundle_files() -> List[Path]:
     for pattern in patterns:
         found.extend(PARAMETERS_DIR.glob(pattern))
     found.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    if not found:
-        print(f"⚠️ В папке {PARAMETERS_DIR} не найдено файлов по маскам: {patterns}")
-    else:
-        try:
-            listing = ", ".join(str(p) for p in found[:5])
-        except Exception:
-            listing = ""
-        print(f"ℹ️ Найдены кандидаты для нутриентной модели: {listing}")
+    # Тихий режим: не печатаем в консоль
     return found
 
 
 def _load_nutrient_assets():
     if joblib is None:
         return None, None, None
-    if sklearn is not None:
-        try:
-            print(f"ℹ️ Используется scikit-learn версии: {sklearn.__version__}")
-        except Exception:
-            pass
     for file_path in _find_nutrient_bundle_files():
         try:
             if file_path.suffix == '.skops':
                 if skops_load is None:
-                    print(f"⚠️ Skops не установлен, пропускаю файл: {file_path}")
                     continue
                 bundle = skops_load(str(file_path), trusted=True)
             else:
@@ -70,9 +56,7 @@ def _load_nutrient_assets():
                 return model, scaler_X, scaler_y
             return bundle, None, None
         except Exception as e:
-            print(f"⚠️ Ошибка загрузки файла нутриентной модели: {file_path}: {e}")
             continue
-    print(f"❌ Не удалось загрузить ни один файл модели нутриентов из: {PARAMETERS_DIR}")
     return None, None, None
 
 

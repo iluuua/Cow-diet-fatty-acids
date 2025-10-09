@@ -3,6 +3,7 @@ import re
 from collections import defaultdict
 import csv
 import pandas as pd
+
 acid_cols = [
     'Масляная', 'Капроновая', 'Каприловая', 'Каприновая', 'Деценовая',
     'Лауриновая', 'Миристиновая', 'Миристолеиновая', 'Пальмитиновая',
@@ -10,11 +11,35 @@ acid_cols = [
     'Линоленовая', 'Арахиновая', 'Бегеновая'
 ]
 
-# Финальные фичи под модель нутриентов (Value_i)
-NUTRIENT_FEATURES = [
-    'Value_0', 'Value_2', 'Value_3', 'Value_4',
-    'Value_5', 'Value_6', 'Value_8', 'Value_9', 'Value_10',
-    'Value_11', 'Value_13', 'Value_15', 'Value_16', 'Value_17'
+nutrient_cols = [
+    'ЧЭЛ 3x NRC',
+    'СП',
+    'Крахмал'
+    'RD Крахмал 3xУровень 1',
+    'Сахар',
+    'НСУ',
+    'НВУ',
+    'aNDFom',
+    'CHO B3 pdNDF',
+    'Растворимая клетчатка',
+    'aNDFom фуража',
+    'peNDF',
+    'CHO B3 медленная фракция',
+    'CHO C uNDF',
+    'СЖ',
+    'ОЖК',
+    'K',
+]
+
+ingredient_cols = [
+    'Кукуруза плющеная', 'Тритикале сенаж',
+    'Патока свекловичная', 'Шрот соевый',
+    'Кукуруза силос', 'Жир защищенный',
+    'Солома', 'Ячмень сухой', 'Кукуруза сухая',
+    'Сено', 'Жом свекловичный', 'Комбикорм',
+    'Кукуруза корнаж', 'Кукуруза влажная',
+    'Пшеница', 'Соевая оболочка', 'Жмых рапсовый',
+    'Сода', 'Л.Е.Д. ЖНАПКХ добавка', 'Кальций пропионат'
 ]
 
 # основной справочник feed_types — дополняйте как нужно
@@ -65,26 +90,6 @@ feed_types = {
     '44': 'концентраты',
     '45': 'кальций пропионат',
 }
-# Для UI: список (код, читаемое название), отсортированный по коду
-INGREDIENT_FEATURES = sorted(feed_types.items(), key=lambda kv: int(kv[0]))
-
-# Маппинг русских названий нутриентов -> Value_i
-NUTRIENT_TO_FEATURE = {
-    'чэл 3x nrc': 'Value_0',
-    'сп': 'Value_2',
-    'крахмал': 'Value_3',
-    'rd крахмал 3xуровень 1': 'Value_4',
-    'сахар': 'Value_5',
-    'нсу': 'Value_6',
-    'нву': 'Value_8',
-    'andfom': 'Value_9',
-    'cho b3 pdndf': 'Value_10',
-    'растворимая клетчатка': 'Value_11',
-    'andfom фуража': 'Value_13',
-    'pendf': 'Value_15',
-    'cho b3 медленная фракция': 'Value_16',
-    'cho c undf': 'Value_17',
-}
 # === Построим обратную карту префиксов (на основе feed_types) ===
 # Ищем в label префиксы вида 'DD.DD' (например '05.06') и мапим -> код
 reverse_prefix_map = {}
@@ -97,12 +102,14 @@ for code, label in feed_types.items():
 # === Маска, которую попросил пользователь (строго) ===
 STRICT_MASK = re.compile(r'\d{4}\.\d{2}\.(\d{2})\.(\d{2})\.\d{1}\.\d{2}')
 
+
 def normalize(s: str) -> str:
     s = s or ''
     s = s.lower()
     s = s.replace('\\', '/')
     s = re.sub(r'[^\S\r\n]+', ' ', s).strip()  # normalize whitespace
     return s
+
 
 def extract_prefix_by_strict_mask(s: str):
     r"""
@@ -116,6 +123,7 @@ def extract_prefix_by_strict_mask(s: str):
         return f"{g1}.{g2}"
     return None
 
+
 def extract_any_pair_prefix(s: str):
     """
     Фолбэк: ищем любую пару 'NN.NN' в тексте (например '05.06' внутри '1603.01.05.06...' или в лейбле).
@@ -123,59 +131,62 @@ def extract_any_pair_prefix(s: str):
     m = re.search(r'(\d{2}\.\d{2})', s)
     return m.group(1) if m else None
 
+
 def is_combikorm_token(s: str):
     # распознаём 'кк', 'кк10', 'кк №10', 'комбиком', 'кормосмесь' и пр.
-    if re.search(r'\bкк\b', s) or re.search(r'\bкк[\s№]*\d+', s) or 'комбиком' in s or 'кормосмесь' in s or 'комбикорм' in s:
+    if re.search(r'\bкк\b', s) or re.search(r'\bкк[\s№]*\d+',
+                                            s) or 'комбиком' in s or 'кормосмесь' in s or 'комбикорм' in s:
         return True
     return False
 
-def categorize_feeds_bulk(feed_names_dict):
+
+def categorize_feed(feed_names_dict):
     feed_types = {
-    '01': '05.06 зерно(кукуруза) плющенное',
-    '02': '12.01 тритикале сенаж',
-    '03': '10.01 однолетние травы сенаж',
-    '04': 'патока свекловичная',
-    '05': 'шрот соевый',
-    '06': '05.02 зерно(кукуруза) силос',
-    '07': 'жир защищенный',
-    '08': '**.04 солома',
-    '09': 'ячмень сухой',
-    '10': '08.01 сенаж',
-    '11': '01.01 люцерна сенаж',
-    '12': 'кукуруза сухая',
-    '13': '06.01 суданка сенаж',
-    '14': 'сено',
-    '15': 'жом свекловичный',
-    '16': '03.01 сенаж',
-    '17': 'комбикорм',
-    '18': '16.01 сенаж',
-    '19': '05.07 зерно(кукуруза) корнаж',
-    '20': 'шрот рапсовый',
-    '21': 'фураж',
-    '22': '05.** кукуруза влажная',
-    '23': 'жмых льняной',
-    '24': '06.02 суданка силос',
-    '25': 'пшеница',
-    '26': 'дрожжи',
-    '27': 'соевая оболочка',
-    '28': 'дробина сухая',
-    '29': '04.01 сенаж',
-    '30': 'жмых рапсовый',
-    '31': 'премикс дойный',
-    '32': 'сода',
-    '33': 'мел',
-    '34': '13.01 рожь сенаж',
-    '35': 'лед жнапкх добавка',
-    '36': '02.01 сенаж',
-    '37': 'шрот подсолнечный',
-    '38': '07.01 сенаж',
-    '39': 'соль',
-    '40': '18.01 зерносмесь сенаж',
-    '41': '09.01 клевер сенаж',
-    '42': '05.01 зерно(кукуруза) сенаж',
-    '43': 'поташ',
-    '44': 'концентраты',
-    '45': 'кальций пропионат',
+        '01': '05.06 зерно(кукуруза) плющенное',
+        '02': '12.01 тритикале сенаж',
+        '03': '10.01 однолетние травы сенаж',
+        '04': 'патока свекловичная',
+        '05': 'шрот соевый',
+        '06': '05.02 зерно(кукуруза) силос',
+        '07': 'жир защищенный',
+        '08': '**.04 солома',
+        '09': 'ячмень сухой',
+        '10': '08.01 сенаж',
+        '11': '01.01 люцерна сенаж',
+        '12': 'кукуруза сухая',
+        '13': '06.01 суданка сенаж',
+        '14': 'сено',
+        '15': 'жом свекловичный',
+        '16': '03.01 сенаж',
+        '17': 'комбикорм',
+        '18': '16.01 сенаж',
+        '19': '05.07 зерно(кукуруза) корнаж',
+        '20': 'шрот рапсовый',
+        '21': 'фураж',
+        '22': '05.** кукуруза влажная',
+        '23': 'жмых льняной',
+        '24': '06.02 суданка силос',
+        '25': 'пшеница',
+        '26': 'дрожжи',
+        '27': 'соевая оболочка',
+        '28': 'дробина сухая',
+        '29': '04.01 сенаж',
+        '30': 'жмых рапсовый',
+        '31': 'премикс дойный',
+        '32': 'сода',
+        '33': 'мел',
+        '34': '13.01 рожь сенаж',
+        '35': 'лед жнапкх добавка',
+        '36': '02.01 сенаж',
+        '37': 'шрот подсолнечный',
+        '38': '07.01 сенаж',
+        '39': 'соль',
+        '40': '18.01 зерносмесь сенаж',
+        '41': '09.01 клевер сенаж',
+        '42': '05.01 зерно(кукуруза) сенаж',
+        '43': 'поташ',
+        '44': 'концентраты',
+        '45': 'кальций пропионат',
     }
     dict_of_names = {}
     for i in feed_types.values():
@@ -249,7 +260,6 @@ def categorize_feeds_bulk(feed_names_dict):
             dict_of_names[feed_types[reverse_prefix_map[pref]]] = feed_name
             found = True
             continue
-                          
 
         # 3) Фолбэк — любая пара NN.NN в тексте (например 05.06)
         pref_any = extract_any_pair_prefix(s)
@@ -376,98 +386,6 @@ def categorize_feeds_bulk(feed_names_dict):
             new_dict[x] = feed_names_dict[dict_of_names[x]]
         else:
             new_dict[x] = 0
-        
+
     ingredients_df = pd.DataFrame({k: [v] for k, v in new_dict.items()})
     return ingredients_df
-
-
-def categorize_feed(feed_name: str):
-    """Совместимость: определяет (group, code, label) по одному имени ингредиента."""
-    s = normalize(feed_name)
-    # По ключевым словам
-    keywords = {
-        'патока': '04', 'меласса': '04',
-        'шрот соев': '05', 'шрот рапсов': '20', 'шрот подсолнеч': '37',
-        'жом свеклов': '15',
-        'кукуруза': '12', 'плющ': '01', 'плющенное': '01',
-        'корнаж': '19', 'силос': '06', 'сенаж': '10',
-        'ячмень': '09', 'люцерна': '11', 'клевер': '41',
-        'сено': '14', 'солома': '08', 'комбикорм': '17', 'кк': '17',
-        'мел': '33', 'соль': '39', 'жир защищ': '07',
-        'премикс': '31', 'поташ': '43', 'концентраты': '44',
-        'жмых льнян': '23', 'жмых рапсов': '30', 'фураж': '21'
-    }
-    code = None
-    for k, v in keywords.items():
-        if k in s:
-            code = v
-            break
-    if not code:
-        # префикс NN.NN в исходной строке
-        m = re.search(r'(\d{2}\.\d{2})', s)
-        if m:
-            pref = m.group(1)
-            for c, label in feed_types.items():
-                if pref in label:
-                    code = c
-                    break
-    label = feed_types.get(code, 'Не определено') if code else 'Не определено'
-    # Группа 4-х компонент
-    group = 'other'
-    nl = s + ' ' + normalize(label)
-    if 'кукуруз' in nl:
-        group = 'corn'
-    elif 'соев' in nl:
-        group = 'soybean'
-    elif 'люцерн' in nl:
-        group = 'alfalfa'
-    return group, code, label
-
-
-def map_ingredients_to_codes(ingredients_by_name):
-    """Агрегирует проценты по кодам feed_types из имён ингредиентов."""
-    result = {code: 0.0 for code in feed_types.keys()}
-    for name, percent in (ingredients_by_name or {}).items():
-        _group, code, _label = categorize_feed(name)
-        if code:
-            result[code] = result.get(code, 0.0) + float(percent or 0.0)
-    return {c: v for c, v in result.items() if v > 0}
-
-
-def aggregate_ratios(ingredients_by_name):
-    """Группы corn/soybean/alfalfa/other по именам ингредиентов."""
-    ratios = {'corn': 0.0, 'soybean': 0.0, 'alfalfa': 0.0, 'other': 0.0}
-    for name, percent in (ingredients_by_name or {}).items():
-        group, _code, _label = categorize_feed(name)
-        ratios[group] += float(percent or 0.0)
-    return ratios
-
-
-def aggregate_ratios_from_codes(ingredients_by_code):
-    """Группы corn/soybean/alfalfa/other по кодам feed_types."""
-    ratios = {'corn': 0.0, 'soybean': 0.0, 'alfalfa': 0.0, 'other': 0.0}
-    for code, percent in (ingredients_by_code or {}).items():
-        label = feed_types.get(code)
-        if not label:
-            ratios['other'] += float(percent or 0.0)
-            continue
-        group, _c, _l = categorize_feed(label)
-        ratios[group] += float(percent or 0.0)
-    return ratios
-
-
-def map_nutrients_to_features(nutrients_by_name):
-    """Маппит нутриенты (по русским названиям) -> Value_i фичи.
-    Неизвестные пропускаем.
-    """
-    features = {}
-    for name, value in (nutrients_by_name or {}).items():
-        key = normalize(name)
-        if key in NUTRIENT_TO_FEATURE:
-            features[NUTRIENT_TO_FEATURE[key]] = float(value)
-            continue
-        for pat, feat in NUTRIENT_TO_FEATURE.items():
-            if pat in key:
-                features[feat] = float(value)
-                break
-    return features

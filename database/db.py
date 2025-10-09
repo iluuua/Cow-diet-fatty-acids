@@ -2,11 +2,19 @@ import sqlite3
 import pandas as pd
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
+import os
 
 
 class DatabaseManager:
-    def __init__(self, db_path: str = "database/milk_analysis.db"):
-        self.db_path = db_path
+    def __init__(self, db_path: str = "milk_analysis.db"):
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        os.makedirs(base_dir, exist_ok=True)
+        if os.path.isabs(db_path):
+            resolved_path = db_path
+        else:
+            db_filename = os.path.basename(db_path)
+            resolved_path = os.path.join(base_dir, db_filename)
+        self.db_path = resolved_path
         self.init_database()
     
     def init_database(self):

@@ -21,8 +21,12 @@ except ImportError:
 from preprocessing.filtration import (
     feed_types,
     categorize_feed,
+)
+from preprocessing.prepare import (
     map_ingredients_to_codes,
     aggregate_ratios,
+    map_parsed_names_to_codes,
+    aggregate_ratios_from_codes,
 )
 
 
@@ -113,8 +117,13 @@ def parse_pdf_diet(pdf_path):
         for table in nutrient_tables:
             nutrients_by_name.update(parse_nutrients_table(table))
 
-    ingredients_by_code = map_ingredients_to_codes(ingredients_by_name)
-    ratios = aggregate_ratios(ingredients_by_name)
+    # 1) Попробуем распознать коды через categorize_feed
+    ingredients_by_code = map_parsed_names_to_codes(ingredients_by_name)
+    # 2) Если не получилось — простой маппер прочитанных лейблов (строгий)
+    if not ingredients_by_code:
+        ingredients_by_code = map_ingredients_to_codes(ingredients_by_name)
+    # 3) Группы считаем от кодов (стабильнее)
+    ratios = aggregate_ratios_from_codes(ingredients_by_code)
 
     return {
         'ingredients': ingredients_by_name,

@@ -49,7 +49,6 @@ def _load_ingredient_model():
         return None
     candidates = _find_ingredient_model_files()
     if not candidates:
-        print(f"⚠️ Файл модели ингредиентов не найден в: {PARAMETERS_DIR}")
         return None
     for model_path in candidates:
         try:
@@ -64,7 +63,6 @@ def _load_ingredient_model():
             return obj
         except Exception:
             continue
-    print(f"❌ Не удалось загрузить ни один файл модели ингредиентов из: {PARAMETERS_DIR}")
     return None
 
 
