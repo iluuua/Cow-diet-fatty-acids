@@ -11,6 +11,14 @@ acid_cols = [
     'Линоленовая', 'Арахиновая', 'Бегеновая'
 ]
 
+# Финальные фичи под модель нутриентов (Value_i)
+NUTRIENT_FEATURES = [
+    'Value_0', 'Value_2', 'Value_3', 'Value_4',
+    'Value_5', 'Value_6', 'Value_8', 'Value_9', 'Value_10',
+    'Value_11', 'Value_13', 'Value_15', 'Value_16', 'Value_17'
+]
+
+# для отображения в UI
 nutrient_cols = [
     'ЧЭЛ 3x NRC',
     'СП',
@@ -31,6 +39,7 @@ nutrient_cols = [
     'K',
 ]
 
+# для отображения в UI
 ingredient_cols = [
     'Кукуруза плющеная', 'Тритикале сенаж',
     'Патока свекловичная', 'Шрот соевый',
@@ -41,6 +50,7 @@ ingredient_cols = [
     'Пшеница', 'Соевая оболочка', 'Жмых рапсовый',
     'Сода', 'Л.Е.Д. ЖНАПКХ добавка', 'Кальций пропионат'
 ]
+
 
 # основной справочник feed_types — дополняйте как нужно
 feed_types = {
@@ -89,6 +99,26 @@ feed_types = {
     '43': 'поташ',
     '44': 'концентраты',
     '45': 'кальций пропионат',
+}
+# Для UI: список (код, читаемое название), отсортированный по коду
+INGREDIENT_FEATURES = sorted(feed_types.items(), key=lambda kv: int(kv[0]))
+
+# Маппинг русских названий нутриентов -> Value_i
+NUTRIENT_TO_FEATURE = {
+    'чэл 3x nrc': 'Value_0',
+    'сп': 'Value_2',
+    'крахмал': 'Value_3',
+    'rd крахмал 3xуровень 1': 'Value_4',
+    'сахар': 'Value_5',
+    'нсу': 'Value_6',
+    'нву': 'Value_8',
+    'andfom': 'Value_9',
+    'cho b3 pdndf': 'Value_10',
+    'растворимая клетчатка': 'Value_11',
+    'andfom фуража': 'Value_13',
+    'pendf': 'Value_15',
+    'cho b3 медленная фракция': 'Value_16',
+    'cho c undf': 'Value_17',
 }
 # === Построим обратную карту префиксов (на основе feed_types) ===
 # Ищем в label префиксы вида 'DD.DD' (например '05.06') и мапим -> код
@@ -140,7 +170,7 @@ def is_combikorm_token(s: str):
     return False
 
 
-def categorize_feed(feed_names_dict):
+def categorize_feeds_bulk(feed_names_dict):
     feed_types = {
         '01': '05.06 зерно(кукуруза) плющенное',
         '02': '12.01 тритикале сенаж',
@@ -389,3 +419,95 @@ def categorize_feed(feed_names_dict):
 
     ingredients_df = pd.DataFrame({k: [v] for k, v in new_dict.items()})
     return ingredients_df
+
+
+def categorize_feed(feed_name: str):
+    """Совместимость: определяет (group, code, label) по одному имени ингредиента."""
+    s = normalize(feed_name)
+    # По ключевым словам
+    keywords = {
+        'патока': '04', 'меласса': '04',
+        'шрот соев': '05', 'шрот рапсов': '20', 'шрот подсолнеч': '37',
+        'жом свеклов': '15',
+        'кукуруза': '12', 'плющ': '01', 'плющенное': '01',
+        'корнаж': '19', 'силос': '06', 'сенаж': '10',
+        'ячмень': '09', 'люцерна': '11', 'клевер': '41',
+        'сено': '14', 'солома': '08', 'комбикорм': '17', 'кк': '17',
+        'мел': '33', 'соль': '39', 'жир защищ': '07',
+        'премикс': '31', 'поташ': '43', 'концентраты': '44',
+        'жмых льнян': '23', 'жмых рапсов': '30', 'фураж': '21'
+    }
+    code = None
+    for k, v in keywords.items():
+        if k in s:
+            code = v
+            break
+    if not code:
+        # префикс NN.NN в исходной строке
+        m = re.search(r'(\d{2}\.\d{2})', s)
+        if m:
+            pref = m.group(1)
+            for c, label in feed_types.items():
+                if pref in label:
+                    code = c
+                    break
+    label = feed_types.get(code, 'Не определено') if code else 'Не определено'
+    # Группа 4-х компонент
+    group = 'other'
+    nl = s + ' ' + normalize(label)
+    if 'кукуруз' in nl:
+        group = 'corn'
+    elif 'соев' in nl:
+        group = 'soybean'
+    elif 'люцерн' in nl:
+        group = 'alfalfa'
+    return group, code, label
+
+
+def map_ingredients_to_codes(ingredients_by_name):
+    """Агрегирует проценты по кодам feed_types из имён ингредиентов."""
+    result = {code: 0.0 for code in feed_types.keys()}
+    for name, percent in (ingredients_by_name or {}).items():
+        _group, code, _label = categorize_feed(name)
+        if code:
+            result[code] = result.get(code, 0.0) + float(percent or 0.0)
+    return {c: v for c, v in result.items() if v > 0}
+
+
+def aggregate_ratios(ingredients_by_name):
+    """Группы corn/soybean/alfalfa/other по именам ингредиентов."""
+    ratios = {'corn': 0.0, 'soybean': 0.0, 'alfalfa': 0.0, 'other': 0.0}
+    for name, percent in (ingredients_by_name or {}).items():
+        group, _code, _label = categorize_feed(name)
+        ratios[group] += float(percent or 0.0)
+    return ratios
+
+
+def aggregate_ratios_from_codes(ingredients_by_code):
+    """Группы corn/soybean/alfalfa/other по кодам feed_types."""
+    ratios = {'corn': 0.0, 'soybean': 0.0, 'alfalfa': 0.0, 'other': 0.0}
+    for code, percent in (ingredients_by_code or {}).items():
+        label = feed_types.get(code)
+        if not label:
+            ratios['other'] += float(percent or 0.0)
+            continue
+        group, _c, _l = categorize_feed(label)
+        ratios[group] += float(percent or 0.0)
+    return ratios
+
+
+def map_nutrients_to_features(nutrients_by_name):
+    """Маппит нутриенты (по русским названиям) -> Value_i фичи.
+    Неизвестные пропускаем.
+    """
+    features = {}
+    for name, value in (nutrients_by_name or {}).items():
+        key = normalize(name)
+        if key in NUTRIENT_TO_FEATURE:
+            features[NUTRIENT_TO_FEATURE[key]] = float(value)
+            continue
+        for pat, feat in NUTRIENT_TO_FEATURE.items():
+            if pat in key:
+                features[feat] = float(value)
+                break
+    return features

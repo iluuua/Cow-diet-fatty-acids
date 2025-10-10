@@ -1,41 +1,27 @@
 import sqlite3
-import pandas as pd
-from datetime import datetime
-from typing import List, Dict, Optional, Tuple
-import os
+from typing import List, Dict, Optional
 
 
 class DatabaseManager:
-    def __init__(self, db_path: str = "milk_analysis.db"):
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        os.makedirs(base_dir, exist_ok=True)
-        if os.path.isabs(db_path):
-            resolved_path = db_path
-        else:
-            db_filename = os.path.basename(db_path)
-            resolved_path = os.path.join(base_dir, db_filename)
-        self.db_path = resolved_path
+    def __init__(self, db_path: str = "database/milk_analysis.db"):
+        self.db_path = db_path
         self.init_database()
-    
+
     def init_database(self):
         """Инициализация базы данных с необходимыми таблицами"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        
+
         # Создание таблицы рационов
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS diets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
-                corn_ratio REAL,
-                soybean_ratio REAL,
-                alfalfa_ratio REAL,
-                other_ratio REAL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-        
+
         # Создание таблицы анализа жирных кислот
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS fatty_acid_analysis (
@@ -51,7 +37,7 @@ class DatabaseManager:
                 FOREIGN KEY (diet_id) REFERENCES diets (id)
             )
         ''')
-        
+
         # Создание таблицы предсказаний
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS predictions (
@@ -67,51 +53,76 @@ class DatabaseManager:
                 FOREIGN KEY (diet_id) REFERENCES diets (id)
             )
         ''')
-        
+
         conn.commit()
         conn.close()
-    
-    def add_diet(self, name: str, corn_ratio: float, soybean_ratio: float, 
-                 alfalfa_ratio: float, other_ratio: float) -> int:
-        """Добавление нового рациона в базу данных"""
+
+    def add_diet(self, name: str,
+                 corn_ratio: float = None,
+                 soybean_ratio: float = None,
+                 alfalfa_ratio: float = None,
+                 other_ratio: float = None) -> int:
+        """Добавление нового рациона в базу данных.
+
+        Поля ratio необязательны. Если они не переданы, сохраняем только name.
+        """
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        
-        cursor.execute('''
-            INSERT INTO diets (name, corn_ratio, soybean_ratio, alfalfa_ratio, other_ratio)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (name, corn_ratio, soybean_ratio, alfalfa_ratio, other_ratio))
-        
+
+        if all(v is None for v in (corn_ratio, soybean_ratio, alfalfa_ratio, other_ratio)):
+            cursor.execute('''
+                INSERT INTO diets (name)
+                VALUES (?)
+            ''', (name,))
+        else:
+            cursor.execute('''
+                INSERT INTO diets (name, corn_ratio, soybean_ratio, alfalfa_ratio, other_ratio)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (name, corn_ratio, soybean_ratio, alfalfa_ratio, other_ratio))
+
         diet_id = cursor.lastrowid
         conn.commit()
         conn.close()
         return diet_id
-    
-    def update_diet(self, diet_id: int, name: str, corn_ratio: float, 
-                   soybean_ratio: float, alfalfa_ratio: float, other_ratio: float):
-        """Обновление существующего рациона"""
+
+    def update_diet(self, diet_id: int, name: str,
+                    corn_ratio: float = None,
+                    soybean_ratio: float = None,
+                    alfalfa_ratio: float = None,
+                    other_ratio: float = None):
+        """Обновление существующего рациона.
+
+        Если ratios не переданы, обновляем только name.
+        """
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        
-        cursor.execute('''
-            UPDATE diets 
-            SET name = ?, corn_ratio = ?, soybean_ratio = ?, 
-                alfalfa_ratio = ?, other_ratio = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-        ''', (name, corn_ratio, soybean_ratio, alfalfa_ratio, other_ratio, diet_id))
-        
+
+        if all(v is None for v in (corn_ratio, soybean_ratio, alfalfa_ratio, other_ratio)):
+            cursor.execute('''
+                UPDATE diets
+                SET name = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            ''', (name, diet_id))
+        else:
+            cursor.execute('''
+                UPDATE diets 
+                SET name = ?, corn_ratio = ?, soybean_ratio = ?, 
+                    alfalfa_ratio = ?, other_ratio = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            ''', (name, corn_ratio, soybean_ratio, alfalfa_ratio, other_ratio, diet_id))
+
         conn.commit()
         conn.close()
-    
+
     def get_diet(self, diet_id: int) -> Optional[Dict]:
         """Получение конкретного рациона по ID"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        
+
         cursor.execute('SELECT * FROM diets WHERE id = ?', (diet_id,))
         result = cursor.fetchone()
         conn.close()
-        
+
         if result:
             return {
                 'id': result[0],
@@ -124,16 +135,16 @@ class DatabaseManager:
                 'updated_at': result[7]
             }
         return None
-    
+
     def get_all_diets(self) -> List[Dict]:
         """Получение всех рационов"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        
+
         cursor.execute('SELECT * FROM diets ORDER BY created_at DESC')
         results = cursor.fetchall()
         conn.close()
-        
+
         return [{
             'id': row[0],
             'name': row[1],
@@ -144,31 +155,31 @@ class DatabaseManager:
             'created_at': row[6],
             'updated_at': row[7]
         } for row in results]
-    
+
     def add_fatty_acid_analysis(self, diet_id: int, lauric: float, palmitic: float,
-                               stearic: float, oleic: float, linoleic: float = None,
-                               linolenic: float = None) -> int:
+                                stearic: float, oleic: float, linoleic: float = None,
+                                linolenic: float = None) -> int:
         """Добавление результатов анализа жирных кислот"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        
+
         cursor.execute('''
             INSERT INTO fatty_acid_analysis 
             (diet_id, lauric_acid, palmitic_acid, stearic_acid, oleic_acid, 
              linoleic_acid, linolenic_acid)
             VALUES (?, ?, ?, ?, ?, ?, ?)
         ''', (diet_id, lauric, palmitic, stearic, oleic, linoleic, linolenic))
-        
+
         analysis_id = cursor.lastrowid
         conn.commit()
         conn.close()
         return analysis_id
-    
+
     def add_prediction(self, diet_id: int, predicted_values: Dict) -> int:
         """Добавление результатов предсказания"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        
+
         cursor.execute('''
             INSERT INTO predictions 
             (diet_id, predicted_lauric, predicted_palmitic, predicted_stearic,
@@ -177,21 +188,21 @@ class DatabaseManager:
         ''', (diet_id, predicted_values.get('lauric', 0), predicted_values.get('palmitic', 0),
               predicted_values.get('stearic', 0), predicted_values.get('oleic', 0),
               predicted_values.get('linoleic', 0), predicted_values.get('linolenic', 0)))
-        
+
         prediction_id = cursor.lastrowid
         conn.commit()
         conn.close()
         return prediction_id
-    
+
     def get_predictions_for_diet(self, diet_id: int) -> List[Dict]:
         """Получение всех предсказаний для конкретного рациона"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        
+
         cursor.execute('SELECT * FROM predictions WHERE diet_id = ? ORDER BY prediction_date DESC', (diet_id,))
         results = cursor.fetchall()
         conn.close()
-        
+
         return [{
             'id': row[0],
             'diet_id': row[1],
@@ -203,16 +214,16 @@ class DatabaseManager:
             'predicted_linolenic': row[7],
             'prediction_date': row[8]
         } for row in results]
-    
+
     def get_analysis_for_diet(self, diet_id: int) -> List[Dict]:
         """Получение всех результатов анализа для конкретного рациона"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        
+
         cursor.execute('SELECT * FROM fatty_acid_analysis WHERE diet_id = ? ORDER BY analysis_date DESC', (diet_id,))
         results = cursor.fetchall()
         conn.close()
-        
+
         return [{
             'id': row[0],
             'diet_id': row[1],
@@ -224,16 +235,16 @@ class DatabaseManager:
             'linolenic_acid': row[7],
             'analysis_date': row[8]
         } for row in results]
-    
+
     def delete_diet(self, diet_id: int):
         """Удаление рациона и всех связанных данных"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        
+
         # Сначала удалить связанные предсказания и анализы
         cursor.execute('DELETE FROM predictions WHERE diet_id = ?', (diet_id,))
         cursor.execute('DELETE FROM fatty_acid_analysis WHERE diet_id = ?', (diet_id,))
         cursor.execute('DELETE FROM diets WHERE id = ?', (diet_id,))
-        
+
         conn.commit()
         conn.close()

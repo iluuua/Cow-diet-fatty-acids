@@ -25,21 +25,19 @@ matplotlib.use('QtAgg')
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 
-from datetime import datetime
 from database import DatabaseManager
-from utils import validate_diet_ratios
+from utils import validate_diet_ratios, check_fatty_acid_ranges
 from utils.constants import FATTY_ACID_NAMES, ingredient_names, nutrient_names
 from preprocessing import (
     parse_pdf_diet,
-    ingredient_cols,
+    get_nutrients_data,
+    INGREDIENT_FEATURES,
     NUTRIENT_FEATURES,
-    map_nutrients_to_features,
-    prepare_ratios,
-    CODE_TO_UI_LABEL,
 )
-from parameters.model import MilkFattyAcidPredictor
-from ingredient_model.pipeline import predict_from_ingredients
-from nutrient_model.pipeline import predict_from_nutrients
+from preprocessing.parser import numeric_from_str
+
+from ingredient_model import predict_from_ingredients
+from nutrient_model import load_model, run_predictions
 
 
 class MplCanvas(FigureCanvasQTAgg):
@@ -71,10 +69,11 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.db = DatabaseManager()
-        self.model = MilkFattyAcidPredictor()
+        self.distribution_points = None
         self.current_diet_data = {}
         self.current_analysis_data = {}
-
+        self.now_open_file = ""
+        self.ing_df_glob = 0
         self.setWindowTitle("Анализ жирнокислотного состава молока")
         self.setGeometry(100, 100, 1400, 900)
 
@@ -93,6 +92,7 @@ class MainWindow(QMainWindow):
         # Главный виджет
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
+        self.nutrients_model = load_model()
 
         # Главный layout
         main_layout = QVBoxLayout(main_widget)
@@ -163,10 +163,10 @@ class MainWindow(QMainWindow):
         ingr_layout = QGridLayout(ingr_widget)
 
         self.ingredient_inputs = {}
-        # Лейблы ингредиентов из filtration.ingredient_cols
-        ingredient_items = [(label, 0.0) for label in ingredient_cols]
+        # Используем читаемые имена из utils.constants.ingredient_names
+        ingredient_items = [(code, ingredient_names.get(code, label), 0.0) for code, label in INGREDIENT_FEATURES]
 
-        for i, (label, default) in enumerate(ingredient_items):
+        for i, (key, label, default) in enumerate(ingredient_items):
             row = i // 2
             col = (i % 2) * 2
             ingr_layout.addWidget(QLabel(f"{label} (% СВ):"), row, col)
@@ -176,7 +176,7 @@ class MainWindow(QMainWindow):
             spin.setSuffix(" %")
             spin.setMinimumWidth(120)
             spin.setMaximumWidth(150)
-            self.ingredient_inputs[label] = spin
+            self.ingredient_inputs[key] = spin
             ingr_layout.addWidget(spin, row, col + 1)
 
         ingr_scroll.setWidget(ingr_widget)
@@ -189,7 +189,7 @@ class MainWindow(QMainWindow):
         manual_layout.addWidget(ingr_group)
 
         # Нутриенты (Value_i признаки)
-        nutr_group = QGroupBox("Нутриенты (фичи модели)")
+        nutr_group = QGroupBox("Нутриенты (СВ)")
         nutr_layout = QGridLayout()
 
         self.nutrient_inputs = {}
@@ -256,9 +256,9 @@ class MainWindow(QMainWindow):
         pred_layout = QVBoxLayout()
 
         self.pred_table = QTableWidget()
-        self.pred_table.setColumnCount(3)
+        self.pred_table.setColumnCount(4)
         self.pred_table.setHorizontalHeaderLabels([
-            'Жирная кислота', 'Предсказанное значение (%)', 'Уверенность'
+            'Жирная кислота', 'Предсказанное значение (%)', 'Уровень по ГОСТу', 'Уверенность'
         ])
         self.pred_table.horizontalHeader().setStretchLastSection(True)
         pred_layout.addWidget(self.pred_table)
@@ -291,16 +291,18 @@ class MainWindow(QMainWindow):
         layout.addLayout(btn_layout)
 
         # Таблица результатов предсказаний
-        results_group = QGroupBox("Результаты предсказаний")
+        results_group = QGroupBox("Построить графики")
         results_layout = QVBoxLayout()
 
         self.results_pred_table = QTableWidget()
-        self.results_pred_table.setColumnCount(3)
+        self.results_pred_table.setColumnCount(4)
         self.results_pred_table.setHorizontalHeaderLabels([
-            'Жирная кислота', 'Значение (%)', 'Уверенность'
+            'Жирная кислота', 'Значение (%)', 'Уровень по ГОСТу', 'Уверенность'
         ])
-        self.results_pred_table.horizontalHeader().setStretchLastSection(True)
-        results_layout.addWidget(self.results_pred_table)
+
+        # Устанавливаем, чтобы столбцы были равной ширины и растягивались
+        header = self.results_pred_table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
 
         results_group.setLayout(results_layout)
         layout.addWidget(results_group)
@@ -311,8 +313,8 @@ class MainWindow(QMainWindow):
 
         # Кнопки для графиков
         graph_btn_layout = QHBoxLayout()
-        dist_btn = QPushButton("Показать распределение")
-        dist_btn.clicked.connect(self.show_distribution)
+        dist_btn = QPushButton("Показать гистограмму")
+        dist_btn.clicked.connect(self.show_hist)
         graph_btn_layout.addWidget(dist_btn)
 
         trend_btn = QPushButton("Показать тренды")
@@ -383,255 +385,235 @@ class MainWindow(QMainWindow):
         """)
         layout.addWidget(info_text)
 
-        # Кнопка загрузки тестовых данных
-        test_btn = QPushButton("Загрузить тестовые данные")
-        test_btn.clicked.connect(self.load_test_data)
-        layout.addWidget(test_btn)
-
     # Обработчики событий
     def load_pdf(self):
         """Загрузка PDF файла"""
         file_path, _ = QFileDialog.getOpenFileName(
             self, "Выберите PDF файл", "", "PDF files (*.pdf)"
         )
+        self.now_open_file = file_path
         if file_path:
+            ing_df, nut_df = parse_pdf_diet(file_path)
+            self.ing_df_glob = ing_df.copy()
+            # Также в форму ингредиентов по кодам
+            # Отображаем результаты парсинга
+            # Подставляем распознанные значения в поля ввода
             try:
-                full_data = parse_pdf_diet(file_path)
+                self._populate_inputs_from_loaded(ing_df, nut_df)
+            except Exception:
+                pass
+            self.display_loading_results(ing_df, nut_df, "PDF")
 
-                # Заполняем форму ингредиентов по лейблам (в приоритете по кодам -> лейблам)
-                ingredients_by_label = {}
-                if full_data.get('ingredients_by_code'):
-                    for code, val in full_data['ingredients_by_code'].items():
-                        label = CODE_TO_UI_LABEL.get(code, ingredient_names.get(code, code))
-                        ingredients_by_label[label] = val
+    def display_loading_results(self, df_ingr, df_nutr, file_type):
+        all_items = []
+
+        def to_float(x):
+            try:
+                return float(x)
+            except Exception:
+                return numeric_from_str(x)
+
+        if df_ingr is not None and not df_ingr.empty:
+            for col in df_ingr.columns:
+                key = str(col)
+                series = df_ingr[col].dropna()
+                if len(series) == 0:
+                    value = None
+                elif len(series) == 1:
+                    value = series.iloc[0]
                 else:
-                    ingredients_by_label = full_data.get('ingredients', {})
-                for label, value in ingredients_by_label.items():
-                    if label in self.ingredient_inputs:
-                        self.ingredient_inputs[label].setValue(value)
+                    try:
+                        value = float(series.mean())
+                    except Exception:
+                        value = series.iloc[0]
+                v = to_float(value)
+                if v is not None and v != 0:
+                    all_items.append((key, v))
 
-                # Заполняем форму нутриентов из распарсенных значений, если возможно
-                nutrients_by_name = full_data.get('nutrients', {})
-                try:
-                    feat_map = map_nutrients_to_features(nutrients_by_name)
-                    for feat_key, spin in self.nutrient_inputs.items():
-                        if feat_key in feat_map:
-                            spin.setValue(float(feat_map[feat_key]))
-                except Exception:
-                    pass
-
-                # Отображаем результаты парсинга
-                self.display_loading_results(full_data, "PDF")
-
-                # Валидация
-                is_valid, message = validate_diet_ratios(full_data['ratios'])
-                if not is_valid:
-                    QMessageBox.warning(self, "Валидация", message)
+        if df_nutr is not None and not df_nutr.empty:
+            for col in [c for c in df_nutr.columns if c in nutrient_names]:
+                key = str(col)
+                series = df_nutr[col].dropna()
+                if len(series) == 0:
+                    value = None
+                elif len(series) == 1:
+                    value = series.iloc[0]
                 else:
-                    QMessageBox.information(self, "Успех", "PDF файл успешно загружен!")
-            except Exception as e:
-                QMessageBox.critical(self, "Ошибка", f"Ошибка загрузки: {str(e)}")
+                    try:
+                        value = float(series.mean())
+                    except Exception:
+                        value = series.iloc[0]
+                v = to_float(value)
+                if v is not None and v != 0:
+                    all_items.append((key, v))
 
-    def load_test_data(self):
-        """Загрузка демонстрационных данных в поля формы."""
-        try:
-            # Название рациона
-            self.diet_name.setText("Тестовый рацион")
-
-            # Параметры рациона (группы) считаются автоматически из ингредиентов
-
-            # Ингредиенты по лейблам: заполним несколько первых как пример
-            sample_ingr_by_label = {}
-            for idx, label in enumerate(ingredient_cols):
-                if idx == 0:
-                    sample_ingr_by_label[label] = 35.0
-                elif idx == 1:
-                    sample_ingr_by_label[label] = 20.0
-                elif idx == 2:
-                    sample_ingr_by_label[label] = 15.0
-                elif idx == 3:
-                    sample_ingr_by_label[label] = 10.0
-                else:
-                    break
-            for label, spin in self.ingredient_inputs.items():
-                spin.setValue(sample_ingr_by_label.get(label, 0.0))
-
-            # Нутриенты (Value_i): заполним первые несколько
-            sample_nutrients = {}
-            for idx, feat in enumerate(NUTRIENT_FEATURES):
-                if idx < 10:
-                    sample_nutrients[feat] = float(100 + idx * 10)
-                else:
-                    break
-            for feat, spin in self.nutrient_inputs.items():
-                spin.setValue(sample_nutrients.get(feat, 0.0))
-
-            # Отобразим собранные данные в таблице результатов загрузки
-            data = {
-                'ingredients': sample_ingr_by_label,
-                'nutrients': sample_nutrients,
-                'ratios': prepare_ratios(sample_ingr_by_label),
-            }
-            self.display_loading_results(data, "TEST")
-            QMessageBox.information(self, "Успех", "Загружены тестовые данные.")
-        except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Ошибка загрузки тестовых данных: {str(e)}")
-
-    def display_loading_results(self, data, file_type):
-        """Отображение результатов парсинга"""
-        try:
-            # Для Excel (dict жирных кислот)
-            if isinstance(data, dict) and 'lauric' in data:
-                all_items = list(data.items())
-            # Для PDF (полный dict из парсера)
+        self.loading_table.setRowCount(len(all_items))
+        self.loading_table.setColumnCount(3)
+        self.loading_table.setHorizontalHeaderLabels(["Параметр", "Значение", "Статус"])
+        for row, (key, v) in enumerate(all_items):
+            # Показываем русские названия нутриентов, если доступны
+            if key in nutrient_names:
+                param_name = nutrient_names[key]
             else:
-                # Составляем таблицу: ингредиенты (код->читаемое имя), нутриенты (Value_i->читаемое имя), группы
-                if data.get('ingredients_by_code'):
-                    ingr_items = [(ingredient_names.get(code, code), v) for code, v in data['ingredients_by_code'].items()]
-                else:
-                    ingr_items = list(data.get('ingredients', {}).items())
+                param_name = FATTY_ACID_NAMES.get(key, key) if 'FATTY_ACID_NAMES' in globals() else key
+            self.loading_table.setItem(row, 0, QTableWidgetItem(param_name))
+            self.loading_table.setItem(row, 1, QTableWidgetItem(f"{float(v):.2f}"))
+            self.loading_table.setItem(row, 2, QTableWidgetItem("OK"))
+        self.loading_table.resizeColumnsToContents()
 
-                # Нутриенты: конвертируем сырые имена -> Value_i -> читаемое
-                try:
-                    feats = map_nutrients_to_features(data.get('nutrients', {}))
-                    nutr_items = [(nutrient_names.get(k, k), v) for k, v in feats.items()]
-                except Exception:
-                    nutr_items = list(data.get('nutrients', {}).items())
-                ratio_items = [(f"Группа: {k}", v) for k, v in data['ratios'].items()]
-                all_items = ingr_items + nutr_items + ratio_items
+    def _populate_inputs_from_loaded(self, df_ingr, df_nutr):
+        """Заполнить спинбоксы ингредиентов и нутриентов данными после загрузки.
 
-            self.loading_table.setRowCount(len(all_items))
+        df_ingr: DataFrame, где колонки — читаемые названия из feed_types (INGREDIENT_FEATURES)
+        df_nutr: DataFrame, где колонки — Value_i
+        """
+        # Ингредиенты: маппим label -> code и подставляем проценты СВ
+        try:
+            if df_ingr is not None and not df_ingr.empty:
+                label_to_code = {label: code for code, label in INGREDIENT_FEATURES}
+                row0 = df_ingr.iloc[0]
+                for label, value in row0.items():
+                    code = label_to_code.get(label)
+                    if not code:
+                        continue
+                    spin = self.ingredient_inputs.get(code)
+                    if spin is None:
+                        continue
+                    try:
+                        val = float(value)
+                        if not np.isnan(val):
+                            spin.setValue(val)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
-            for row, (key, value) in enumerate(all_items):
-                # Для жирных кислот используем словарь имён, иначе уже читаемое имя
-                param_name = FATTY_ACID_NAMES.get(key, key)
-                self.loading_table.setItem(row, 0, QTableWidgetItem(param_name))
-                self.loading_table.setItem(row, 1, QTableWidgetItem(f"{value:.2f}"))
-
-                status = "OK" if value > 0 else "Нет данных"
-                self.loading_table.setItem(row, 2, QTableWidgetItem(status))
-
-        except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Ошибка отображения: {str(e)}")
+        # Нутриенты: подставляем только те Value_i, которые отображаются в форме
+        try:
+            if df_nutr is not None and not df_nutr.empty:
+                row0 = df_nutr.iloc[0]
+                for key, spin in self.nutrient_inputs.items():
+                    if key not in row0.index:
+                        continue
+                    raw_val = row0[key]
+                    val = None
+                    try:
+                        # сначала пробуем напрямую
+                        val = float(raw_val)
+                    except Exception:
+                        # затем извлекаем число из строки вида '1,23 %'
+                        try:
+                            val = numeric_from_str(raw_val)
+                        except Exception:
+                            val = None
+                    if val is not None and not np.isnan(val):
+                        spin.setValue(val)
+        except Exception:
+            pass
 
     def save_loading_data(self):
         """Сохранение данных из вкладки загрузки"""
         try:
             # Сбор данных из ингредиентов и нутриентов
-            self.current_diet_data = {label: spin.value() for label, spin in self.ingredient_inputs.items()}
+            self.current_diet_data = {k: v.value() for k, v in self.ingredient_inputs.items()}
             nutrients_data = {k: v.value() for k, v in self.nutrient_inputs.items()}
-
             # Валидация рациона
             is_valid, message = validate_diet_ratios(self.current_diet_data)
             if not is_valid:
                 QMessageBox.warning(self, "Ошибка валидации", message)
                 return
-
-            # Сохранение рациона в БД (4 группы), считаем по введённым лейблам
-            entered_labels = {label: val for label, val in self.current_diet_data.items() if val > 0}
-            ratios = prepare_ratios(entered_labels)
+            entered_codes = {code: val for code, val in self.current_diet_data.items() if val > 0}
             diet_id = self.db.add_diet(
                 name=self.diet_name.text(),
-                corn_ratio=ratios.get('corn', 0.0),
-                soybean_ratio=ratios.get('soybean', 0.0),
-                alfalfa_ratio=ratios.get('alfalfa', 0.0),
-                other_ratio=ratios.get('other', 0.0)
             )
-
             # Сохраняем diet_id для использования в предсказаниях
             self.current_diet_id = diet_id
-
             QMessageBox.information(self, "Успех",
                                     "Данные сохранены в БД! Теперь можете перейти в вкладку Предсказания.")
             self.statusBar().showMessage(f"Данные сохранены (ID рациона: {diet_id})")
-
             # Переключаемся на вкладку предсказаний
             self.tabs.setCurrentIndex(1)
-
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Ошибка сохранения: {str(e)}")
 
     def generate_predictions(self):
-        """Генерация предсказаний"""
+        if not self.now_open_file:
+            QMessageBox.warning(
+                self, "Нет данных",
+                "Сначала загрузите файл с рационом во вкладке «Загрузка»."
+            )
+            return
         try:
-            # Считаем группы из введённых ингредиентов (лейблы)
-            ingredients_by_label = {label: spin.value() for label, spin in self.ingredient_inputs.items() if spin.value() > 0}
-            diet_ratios = prepare_ratios(ingredients_by_label)
-
-            is_valid, message = self.model.validate_input(diet_ratios)
-            if not is_valid:
-                QMessageBox.warning(self, "Ошибка валидации", message)
-                return
-
-            # Собираем входы для двух пайплайнов
-            # 1) По ингредиентам: берём введённые пользователем лейблы с ненулевыми значениями
-            ingredients_by_name = ingredients_by_label
-
             # 2) По нутриентам: соберём Value_i
+            nutrients_data_no_vibecode = get_nutrients_data(self.now_open_file)
+            print(nutrients_data_no_vibecode, len(nutrients_data_no_vibecode))
             nutrients_by_feat = {k: v.value() for k, v in self.nutrient_inputs.items() if v.value() > 0}
-
             # Предсказания двух моделей
-            pred_ingr = predict_from_ingredients(ingredients_by_name)
-            pred_nutr = predict_from_nutrients(nutrients_by_feat)
-
+            pred_ingr = predict_from_ingredients(self.ing_df_glob).tolist()[0]
+            pred_nutr = run_predictions(nutrients_data_no_vibecode, self.nutrients_model).tolist()[0]
+            print(pred_ingr, pred_nutr)
             # Усреднение
-            acids = ['lauric', 'palmitic', 'stearic', 'oleic', 'linoleic', 'linolenic']
+            acids = ['Масляная', 'Капроновая', 'Каприловая', 'Каприновая', 'Деценовая', 'Лауриновая',
+                     'Миристиновая', 'Миристолеиновая', 'Пальмитиновая', 'Пальмитолеиновая',
+                     'Стеариновая', 'Олеиновая', 'Линолевая', 'Линоленовая', 'Арахиновая', 'Бегеновая']
             predictions = {}
-            for a in acids:
-                predictions[a] = (float(pred_ingr.get(a, 0.0)) + float(pred_nutr.get(a, 0.0))) / 2.0
-
+            for i, a in enumerate(acids):
+                predictions[a] = (pred_ingr[i] + pred_nutr[i]) / 2.0
             self.current_predictions = predictions
-
             # Заполняем таблицу предсказаний
             self.pred_table.setRowCount(len(predictions))
-
+            # Рассчитываем уровень по ГОСТу для каждого значения
+            gost_levels = check_fatty_acid_ranges([predictions[a] for a in acids])
             for row, (acid, value) in enumerate(predictions.items()):
                 self.pred_table.setItem(row, 0, QTableWidgetItem(FATTY_ACID_NAMES.get(acid, acid)))
                 self.pred_table.setItem(row, 1, QTableWidgetItem(f"{value:.2f}"))
-                self.pred_table.setItem(row, 2, QTableWidgetItem(
+                self.pred_table.setItem(row, 2, QTableWidgetItem(gost_levels[row]))
+                self.pred_table.setItem(row, 3, QTableWidgetItem(
                     "Высокая" if value > 0.1 else "Средняя"
                 ))
-
-            # Сохраняем предсказания в БД, если есть diet_id
-            if self.current_diet_id:
-                prediction_id = self.db.add_prediction(self.current_diet_id, predictions)
-                self.statusBar().showMessage(f"Предсказания сгенерированы и сохранены (ID: {prediction_id})")
-            else:
-                # Если нет diet_id, создаем новый рацион
-                diet_id = self.db.add_diet(
-                    name=f"Рацион из предсказаний {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-                    corn_ratio=diet_ratios['corn'],
-                    soybean_ratio=diet_ratios['soybean'],
-                    alfalfa_ratio=diet_ratios['alfalfa'],
-                    other_ratio=diet_ratios['other']
-                )
-                self.current_diet_id = diet_id
-                prediction_id = self.db.add_prediction(diet_id, predictions)
-                self.statusBar().showMessage(
-                    f"Предсказания сгенерированы и сохранены (Diet ID: {diet_id}, Prediction ID: {prediction_id})")
-
-            # Также обновляем таблицу результатов
-            self.update_results_table()
-
+            print(predictions)
+            self.distribution_points = predictions
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Ошибка предсказаний: {str(e)}")
+            raise e
+
+        """# Сохраняем предсказания в БД, если есть diet_id
+        if self.current_diet_id:
+            prediction_id = self.db.add_prediction(self.current_diet_id, predictions)
+            self.statusBar().showMessage(f"Предсказания сгенерированы и сохранены (ID: {prediction_id})")
+        else:
+            # Если нет diet_id, создаем новый рацион
+            diet_id = self.db.add_diet(
+                name=f"Рацион из предсказаний {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            )
+            self.current_diet_id = diet_id
+            prediction_id = self.db.add_prediction(diet_id, predictions)
+            self.statusBar().showMessage(
+                f"Предсказания сгенерированы и сохранены (Diet ID: {diet_id}, Prediction ID: {prediction_id})")
+        # Также обновляем таблицу результатов
+        self.update_results_table()"""
 
     def update_results_table(self):
         """Обновление таблицы результатов"""
         try:
             if not self.current_predictions:
                 return
-
             self.results_pred_table.setRowCount(len(self.current_predictions))
-
-            for row, (acid, value) in enumerate(self.current_predictions.items()):
+            acids_order = ['Масляная', 'Капроновая', 'Каприловая', 'Каприновая', 'Деценовая', 'Лауриновая',
+                           'Миристиновая', 'Миристолеиновая', 'Пальмитиновая', 'Пальмитолеиновая',
+                           'Стеариновая', 'Олеиновая', 'Линолевая', 'Линоленовая', 'Арахиновая', 'Бегеновая']
+            values_in_order = [self.current_predictions.get(a, 0.0) for a in acids_order]
+            gost_levels = check_fatty_acid_ranges(values_in_order)
+            for row, acid in enumerate(acids_order):
+                value = self.current_predictions.get(acid, 0.0)
                 self.results_pred_table.setItem(row, 0, QTableWidgetItem(FATTY_ACID_NAMES.get(acid, acid)))
                 self.results_pred_table.setItem(row, 1, QTableWidgetItem(f"{value:.2f}"))
-                self.results_pred_table.setItem(row, 2, QTableWidgetItem(
+                self.results_pred_table.setItem(row, 2, QTableWidgetItem(gost_levels[row]))
+                self.results_pred_table.setItem(row, 3, QTableWidgetItem(
                     "Высокая" if value > 0.1 else "Средняя"
                 ))
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Ошибка обновления: {str(e)}")
+
 
     def export_to_docx(self):
         """Экспорт результатов в DOCX"""
@@ -639,33 +621,26 @@ class MainWindow(QMainWindow):
             if not self.current_predictions:
                 QMessageBox.warning(self, "Предупреждение", "Сначала сгенерируйте предсказания!")
                 return
-
             from docx import Document
-
             file_path, _ = QFileDialog.getSaveFileName(
                 self, "Сохранить как", "результаты.docx", "Word files (*.docx)"
             )
-
             if file_path:
                 doc = Document()
                 doc.add_heading('Результаты предсказания жирнокислотного состава', 0)
-
                 table = doc.add_table(rows=1, cols=3)
                 table.style = 'Light Grid Accent 1'
                 hdr_cells = table.rows[0].cells
                 hdr_cells[0].text = 'Жирная кислота'
                 hdr_cells[1].text = 'Значение (%)'
                 hdr_cells[2].text = 'Уверенность'
-
                 for acid, value in self.current_predictions.items():
                     row_cells = table.add_row().cells
                     row_cells[0].text = FATTY_ACID_NAMES.get(acid, acid)
                     row_cells[1].text = f"{value:.2f}"
                     row_cells[2].text = "Высокая" if value > 0.1 else "Средняя"
-
                 doc.save(file_path)
                 QMessageBox.information(self, "Успех", f"Экспорт в DOCX завершен: {file_path}")
-
         except ImportError:
             QMessageBox.critical(self, "Ошибка", "Установите python-docx: pip install python-docx")
         except Exception as e:
@@ -681,20 +656,40 @@ class MainWindow(QMainWindow):
             from reportlab.lib.pagesizes import letter
             from reportlab.lib import colors
             from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph
-            from reportlab.lib.styles import getSampleStyleSheet
+            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+            from reportlab.pdfbase import pdfmetrics
+            from reportlab.pdfbase.ttfonts import TTFont
+
+            # Регистрируем шрифт с поддержкой кириллицы
+            pdfmetrics.registerFont(TTFont('Arial', 'arial.ttf'))
 
             file_path, _ = QFileDialog.getSaveFileName(
                 self, "Сохранить как", "результаты.pdf", "PDF files (*.pdf)"
             )
-
             if file_path:
                 doc = SimpleDocTemplate(file_path, pagesize=letter)
                 elements = []
 
+                # Настраиваем стиль для русского текста
                 styles = getSampleStyleSheet()
-                elements.append(Paragraph("Результаты предсказания жирнокислотного состава", styles['Title']))
+                title_style = ParagraphStyle(
+                    'CustomTitle',
+                    parent=styles['Title'],
+                    fontName='Arial',
+                    fontSize=16,
+                    leading=20
+                )
+                normal_style = ParagraphStyle(
+                    'CustomNormal',
+                    parent=styles['Normal'],
+                    fontName='Arial',
+                    fontSize=12,
+                    leading=14
+                )
 
-                data = [['Жирная кислота', 'Значение (%)', 'Уверенность']]
+                elements.append(Paragraph("Результаты предсказания жирнокислотного состава", title_style))
+
+                data = [['Жирная кислота', 'Значение (%)', 'Уровень по ГОСТу', 'Уверенность']]
                 for acid, value in self.current_predictions.items():
                     data.append([
                         FATTY_ACID_NAMES.get(acid, acid),
@@ -707,20 +702,21 @@ class MainWindow(QMainWindow):
                     ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
                     ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
                     ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('FONTNAME', (0, 0), (-1, 0), 'Arial'),
                     ('FONTSIZE', (0, 0), (-1, 0), 14),
                     ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
                     ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
-                    ('GRID', (0, 0), (-1, -1), 1, colors.black)
+                    ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                    ('FONTNAME', (0, 1), (-1, -1), 'Arial'),  # Применяем шрифт ко всей таблице
+                    ('FONTSIZE', (0, 1), (-1, -1), 10),
                 ]))
 
                 elements.append(table)
                 doc.build(elements)
-
                 QMessageBox.information(self, "Успех", f"Экспорт в PDF завершен: {file_path}")
 
         except ImportError:
-            QMessageBox.critical(self, "Ошибка", "Установите reportlab: pip install reportlab")
+            QMessageBox.critical(self, "Ошибка", "Установите reportlab и DejaVuSans: pip install reportlab")
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Ошибка экспорта: {str(e)}")
 
@@ -730,24 +726,61 @@ class MainWindow(QMainWindow):
             if not self.current_predictions:
                 QMessageBox.warning(self, "Предупреждение", "Сначала сгенерируйте предсказания!")
                 return
-
             from PyQt6.QtPrintSupport import QPrinter, QPrintDialog
             from PyQt6.QtGui import QPainter
-
             printer = QPrinter()
             dialog = QPrintDialog(printer, self)
-
             if dialog.exec() == QPrintDialog.DialogCode.Accepted:
                 painter = QPainter(printer)
-
                 # Простая печать таблицы
                 self.results_pred_table.render(painter)
-
                 painter.end()
                 QMessageBox.information(self, "Успех", "Печать завершена!")
-
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Ошибка печати: {str(e)}")
+
+    def show_hist(self):
+        """Показать распределение"""
+        try:
+            if not hasattr(self, 'distribution_points') or not self.distribution_points:
+                self.canvas.axes.clear()
+                self.canvas.axes.text(0.5, 0.5, 'Нет данных', ha='center', va='center')
+                self.canvas.draw()
+                return
+
+            # Получаем ключи и значения из словаря
+            labels = list(self.distribution_points.keys())
+            values = list(self.distribution_points.values())
+
+            # Проверяем, что списки не пусты
+            if len(labels) == 0 or len(values) == 0:
+                self.canvas.axes.clear()
+                self.canvas.axes.text(0.5, 0.5, 'Нет данных', ha='center', va='center')
+                self.canvas.draw()
+                return
+
+            self.canvas.axes.clear()
+            bars = self.canvas.axes.bar(labels, values, alpha=0.7)
+
+            # Подписываем значения сверху столбцов
+            for bar, value in zip(bars, values):
+                height = bar.get_height()
+                self.canvas.axes.text(
+                    bar.get_x() + bar.get_width() / 2., height,
+                    f'{value:.2f}',
+                    ha='center', va='bottom'
+                )
+
+            self.canvas.axes.set_xlabel('Жирные кислоты')
+            self.canvas.axes.set_ylabel('Значение (%)')
+            self.canvas.axes.set_title('Распределение жирных кислот')
+            self.canvas.axes.tick_params(axis='x', rotation=45)
+            self.canvas.figure.tight_layout()
+            self.canvas.draw()
+
+        except Exception as e:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.critical(self, "Ошибка", f"Ошибка графика: {str(e)}")
 
     def show_distribution(self):
         """Показать распределение"""
@@ -757,18 +790,15 @@ class MainWindow(QMainWindow):
             for diet in diets:
                 analyses = self.db.get_analysis_for_diet(diet['id'])
                 all_analyses.extend(analyses)
-
             if not all_analyses:
                 self.canvas.axes.clear()
                 self.canvas.axes.text(0.5, 0.5, 'Нет данных', ha='center', va='center')
                 self.canvas.draw()
                 return
-
             acids = ['lauric_acid', 'palmitic_acid', 'stearic_acid',
                      'oleic_acid', 'linoleic_acid', 'linolenic_acid']
             names = ['Лауриновая', 'Пальмитиновая', 'Стеариновая',
                      'Олеиновая', 'Линолевая', 'Линоленовая']
-
             data_means = []
             labels = []
             for acid, name in zip(acids, names):
@@ -776,7 +806,6 @@ class MainWindow(QMainWindow):
                 if values:
                     data_means.append(np.mean(values))
                     labels.append(name)
-
             self.canvas.axes.clear()
             self.canvas.axes.bar(labels, data_means, alpha=0.7, color='steelblue')
             self.canvas.axes.set_xlabel('Жирные кислоты')
@@ -785,7 +814,6 @@ class MainWindow(QMainWindow):
             self.canvas.axes.tick_params(axis='x', rotation=45)
             self.canvas.figure.tight_layout()
             self.canvas.draw()
-
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Ошибка графика: {str(e)}")
 
@@ -823,15 +851,12 @@ class MainWindow(QMainWindow):
             # Если секция ещё не инициализирована (например, вкладка не создана)
             if not hasattr(self, 'prepared_grid'):
                 return
-
             self.clear_prepared_grid()
-
             if not os.path.isdir(self.visuals_dir):
                 placeholder = QLabel("Папка с графиками не найдена: " + self.visuals_dir)
                 placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.prepared_grid.addWidget(placeholder, 0, 0)
                 return
-
             entries = sorted(os.listdir(self.visuals_dir))
             image_exts = {'.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif'}
             image_paths = [
@@ -839,25 +864,21 @@ class MainWindow(QMainWindow):
                 for name in entries
                 if os.path.splitext(name)[1].lower() in image_exts
             ]
-
             if not image_paths:
                 placeholder = QLabel("Нет изображений в папке visuals")
                 placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.prepared_grid.addWidget(placeholder, 0, 0)
                 return
-
             columns = 3
             row = 0
             col = 0
             thumb_max_w, thumb_max_h = 320, 220
-
             for path in image_paths:
                 # Контейнер одного элемента
                 item_widget = QWidget()
                 vbox = QVBoxLayout(item_widget)
                 vbox.setContentsMargins(6, 6, 6, 6)
                 vbox.setSpacing(6)
-
                 pixmap = QPixmap(path)
                 if not pixmap.isNull():
                     scaled = pixmap.scaled(
@@ -874,18 +895,15 @@ class MainWindow(QMainWindow):
                     broken = QLabel("Не удалось загрузить изображение")
                     broken.setAlignment(Qt.AlignmentFlag.AlignCenter)
                     vbox.addWidget(broken)
-
                 name_label = QLabel(os.path.basename(path))
                 name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 name_label.setWordWrap(True)
                 vbox.addWidget(name_label)
-
                 self.prepared_grid.addWidget(item_widget, row, col)
                 col += 1
                 if col >= columns:
                     col = 0
                     row += 1
-
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Ошибка загрузки изображений: {str(e)}")
 
@@ -895,16 +913,13 @@ class MainWindow(QMainWindow):
             dialog = QDialog(self)
             dialog.setWindowTitle(os.path.basename(image_path))
             dialog.resize(1000, 700)
-
             layout = QVBoxLayout(dialog)
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
-
             container = QWidget()
             v = QVBoxLayout(container)
             v.setContentsMargins(0, 0, 0, 0)
             v.setSpacing(0)
-
             lbl = QLabel()
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             pm = QPixmap(image_path)
@@ -920,18 +935,15 @@ class MainWindow(QMainWindow):
                     Qt.TransformationMode.SmoothTransformation
                 )
                 lbl.setPixmap(scaled)
-
             v.addWidget(lbl)
             scroll.setWidget(container)
             layout.addWidget(scroll)
-
             btn_box = QHBoxLayout()
             close_btn = QPushButton("Закрыть")
             close_btn.clicked.connect(dialog.accept)
             btn_box.addStretch()
             btn_box.addWidget(close_btn)
             layout.addLayout(btn_box)
-
             dialog.exec()
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Ошибка просмотра изображения: {str(e)}")
