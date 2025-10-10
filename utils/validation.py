@@ -2,8 +2,8 @@
 from typing import Dict, Tuple
 from .constants import GOST
 
+
 def validate_diet_ratios(ratios: Dict[str, float]) -> Tuple[bool, str]:
-    # Разрешаем любую сумму процентов; проверяем только на неотрицательность
     if any(ratio < 0 for ratio in ratios.values()):
         return False, "Все соотношения должны быть положительными"
     return True, "Соотношения рациона корректны"

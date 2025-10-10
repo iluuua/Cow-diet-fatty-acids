@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 Десктопное приложение для анализа жирнокислотного состава молока (PyQt6)
-Конвертировано из Streamlit в PyQt6
 """
 
 import os
@@ -607,12 +606,33 @@ class MainWindow(QMainWindow):
                 value = self.current_predictions.get(acid, 0.0)
                 self.results_pred_table.setItem(row, 0, QTableWidgetItem(FATTY_ACID_NAMES.get(acid, acid)))
                 self.results_pred_table.setItem(row, 1, QTableWidgetItem(f"{value:.2f}"))
-                self.results_pred_table.setItem(row, 2, QTableWidgetItem(gost_levels[row]))
-                self.results_pred_table.setItem(row, 3, QTableWidgetItem(
-                    "Высокая" if value > 0.1 else "Средняя"
-                ))
+                # Форматируем «уровень по ГОСТу» и «уверенность»
+                self.results_pred_table.setItem(row, 2, QTableWidgetItem(self._gost_level_text(gost_levels[row])))
+                self.results_pred_table.setItem(row, 3, QTableWidgetItem(self._confidence_text(value)))
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Ошибка обновления: {str(e)}")
+
+
+    def _gost_level_text(self, text: str) -> str:
+        """Единый формат отображения уровня по ГОСТу в экспорте и печати."""
+        try:
+            if isinstance(text, str):
+                if text.startswith('Ниже на '):
+                    num = text.replace('Ниже на ', '')
+                    return f"Ниже нормы на {num} %"
+                if text.startswith('Выше на '):
+                    num = text.replace('Выше на ', '')
+                    return f"Выше нормы на {num} %"
+            return text
+        except Exception:
+            return text
+
+    def _confidence_text(self, value: float) -> str:
+        """Единый формат отображения уверенности предсказания."""
+        try:
+            return "Высокая" if float(value) > 0.1 else "Средняя"
+        except Exception:
+            return "Средняя"
 
 
     def export_to_docx(self):
@@ -628,17 +648,28 @@ class MainWindow(QMainWindow):
             if file_path:
                 doc = Document()
                 doc.add_heading('Результаты предсказания жирнокислотного состава', 0)
-                table = doc.add_table(rows=1, cols=3)
+                # 4 колонки: Кислота, Значение, Уровень по ГОСТу, Уверенность
+                table = doc.add_table(rows=1, cols=4)
                 table.style = 'Light Grid Accent 1'
                 hdr_cells = table.rows[0].cells
                 hdr_cells[0].text = 'Жирная кислота'
                 hdr_cells[1].text = 'Значение (%)'
-                hdr_cells[2].text = 'Уверенность'
-                for acid, value in self.current_predictions.items():
+                hdr_cells[2].text = 'Уровень по ГОСТу'
+                hdr_cells[3].text = 'Уверенность'
+
+                acids_order = ['Масляная', 'Капроновая', 'Каприловая', 'Каприновая', 'Деценовая', 'Лауриновая',
+                               'Миристиновая', 'Миристолеиновая', 'Пальмитиновая', 'Пальмитолеиновая',
+                               'Стеариновая', 'Олеиновая', 'Линолевая', 'Линоленовая', 'Арахиновая', 'Бегеновая']
+                values_in_order = [self.current_predictions.get(a, 0.0) for a in acids_order]
+                gost_levels = check_fatty_acid_ranges(values_in_order)
+
+                for idx, acid in enumerate(acids_order):
+                    value = values_in_order[idx]
                     row_cells = table.add_row().cells
                     row_cells[0].text = FATTY_ACID_NAMES.get(acid, acid)
                     row_cells[1].text = f"{value:.2f}"
-                    row_cells[2].text = "Высокая" if value > 0.1 else "Средняя"
+                    row_cells[2].text = self._gost_level_text(gost_levels[idx])
+                    row_cells[3].text = self._confidence_text(value)
                 doc.save(file_path)
                 QMessageBox.information(self, "Успех", f"Экспорт в DOCX завершен: {file_path}")
         except ImportError:
@@ -690,11 +721,20 @@ class MainWindow(QMainWindow):
                 elements.append(Paragraph("Результаты предсказания жирнокислотного состава", title_style))
 
                 data = [['Жирная кислота', 'Значение (%)', 'Уровень по ГОСТу', 'Уверенность']]
-                for acid, value in self.current_predictions.items():
+
+                acids_order = ['Масляная', 'Капроновая', 'Каприловая', 'Каприновая', 'Деценовая', 'Лауриновая',
+                               'Миристиновая', 'Миристолеиновая', 'Пальмитиновая', 'Пальмитолеиновая',
+                               'Стеариновая', 'Олеиновая', 'Линолевая', 'Линоленовая', 'Арахиновая', 'Бегеновая']
+                values_in_order = [self.current_predictions.get(a, 0.0) for a in acids_order]
+                gost_levels = check_fatty_acid_ranges(values_in_order)
+
+                for idx, acid in enumerate(acids_order):
+                    value = values_in_order[idx]
                     data.append([
                         FATTY_ACID_NAMES.get(acid, acid),
                         f"{value:.2f}",
-                        "Высокая" if value > 0.1 else "Средняя"
+                        self._gost_level_text(gost_levels[idx]),
+                        self._confidence_text(value)
                     ])
 
                 table = Table(data)
@@ -733,6 +773,8 @@ class MainWindow(QMainWindow):
             if dialog.exec() == QPrintDialog.DialogCode.Accepted:
                 painter = QPainter(printer)
                 # Простая печать таблицы
+                # Обновляем таблицу перед печатью, чтобы гарантировать актуальные значения и формат
+                self.update_results_table()
                 self.results_pred_table.render(painter)
                 painter.end()
                 QMessageBox.information(self, "Успех", "Печать завершена!")

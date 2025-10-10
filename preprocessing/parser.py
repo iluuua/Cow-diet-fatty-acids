@@ -1,8 +1,5 @@
 # parser.py
 import re
-from pathlib import Path
-from typing import Dict
-from collections import defaultdict
 import pandas as pd
 
 try:
@@ -13,24 +10,12 @@ try:
 except Exception as e:
     CAMELOT_AVAILABLE = False
     CAMELOT_IMPORT_ERROR = e
-try:
-    from pdf2image import convert_from_path
-    import pytesseract
-
-    OCR_AVAILABLE = True
-except ImportError:
-    OCR_AVAILABLE = False
+# OCR не используется в текущей реализации, удалён
 
 from preprocessing.filtration import (
-    feed_types,
-    categorize_feed,
-    map_ingredients_to_codes,
-    aggregate_ratios,
     categorize_feeds_bulk,
 )
 
-import pandas as pd
-import openpyxl
 from typing import List
 
 # Обновлённый список all_columns
@@ -78,113 +63,6 @@ def postprocess_table_data(df: pd.DataFrame) -> List:
         result.append(value)
 
     return result
-
-
-def process_excel_and_save_csv(xls_path, data_path, output_csv):
-    # Словарь регионов
-    region_name = {
-        "ЭНА": "ЭНА",
-        "Ока": "ОМ",
-        "СевНива": "СН",
-        "Калуга": "КН",
-        "МоПеТю": "Тюмень"
-    }
-
-    # 1. Загружаем Excel
-    workbook = openpyxl.load_workbook(xls_path)
-    sheet = workbook.active
-
-    all_rows = []
-    for row in sheet.iter_rows(values_only=True):
-        row_names = list(row)[:-6]
-        all_rows.append(row_names)
-
-    columns = ['Регион', 'Дата', 'Наменование ЖК', 'Рацион',
-               'Масляная', 'Капроновая', 'Каприловая', 'Каприновая',
-               'Деценовая', 'Лауриновая', 'Миристиновая', 'Миристолеиновая',
-               'Пальмитиновая', 'Пальмитолеиновая', 'Стеариновая', 'Олеиновая',
-               'Линолевая', 'Линоленовая', 'Арахиновая', 'Бегеновая', 'Прочие']
-
-    data_rows = all_rows[3:]
-    df = pd.DataFrame(data_rows, columns=columns)
-
-    results = []
-    pdf_columns_count = None
-
-    # 2. Проходим по строкам Excel
-    for idx, row in df.iterrows():
-        region = row["Регион"]
-        ration = row["Рацион"]
-
-        try:
-            # 3. Формируем путь
-            full_path = data_path + region_name[region] + "/" + ration + ".pdf"
-
-            # 4. Парсим PDF
-            all_tables = parse_pdf(full_path)  # предполагается, что parse_pdf определена
-            analysis = None
-            for j in range(len(all_tables)):
-                first_cell = str(all_tables[j].iloc[0, 0])
-                if "Сводный анализ" in first_cell:
-                    analysis = all_tables[j]
-                    break
-
-            if analysis is None:
-                print(f"[{idx}] таблица не найдена → пропуск")
-                continue
-
-            # 5. Обрабатываем таблицу
-            values = postprocess_table_data(analysis)
-
-            # 6. Проверка длины
-            if pdf_columns_count is None:
-                pdf_columns_count = len(values)
-            elif len(values) != pdf_columns_count:
-                print(f"[{idx}] разное количество значений ({len(values)} вместо {pdf_columns_count}) → пропуск")
-                continue
-
-            # 7. Склеиваем в строку: данные из Excel + PDF-значения
-            combined_row = list(row.values) + values
-            results.append(combined_row)
-
-        except Exception as e:
-            print(f"[{idx}] ошибка: {e} → пропуск")
-            continue
-
-    if not results:
-        print("Нет данных для сохранения.")
-        return
-
-    # 8. Сохраняем в CSV
-    pdf_columns = [f"Value_{i}" for i in range(pdf_columns_count)]
-    final_columns = columns + pdf_columns
-    result_df = pd.DataFrame(results, columns=final_columns)
-    result_df.to_csv(output_csv, index=False, encoding="utf-8-sig")
-
-    print(f"Готово! Данные сохранены в {output_csv}")
-
-
-import camelot
-import pandas as pd
-from typing import List
-
-all_columns = [
-    'Нутриент', 'Фураж', 'Концентрат', 'ЧЭЛ 3x NRC', 'ОЭ', 'СП', 'ПНР 3x Уровень 1', 'Сол. КП', 'Крахмал', 'aNDFom',
-    'aNDFom фуража', 'CHO C uNDF', 'Растворимая', 'КДК', 'Сахар (ВРУ)', 'НСУ', 'НВУ', 'СЖ', 'ОЖК', 'СВ', 'Влага',
-    'Зола', 'Ca', 'P', 'Mg', 'K', 'Na', 'Cl', 'S', 'НРП', 'peNDF', 'Растворимая клетчатка', 'СК', 'Азот', 'NaCl',
-    'Fe - всего', 'Cu - всего', 'Zn - всего', 'НДНП', 'RD Крахмал', 'RD CHO 3x', 'LYS', 'MET', 'RD Крахмал 3xУровень 1',
-    'Масляная', 'КДЛ', 'СУ', 'Уксусная', 'Пропионовая', 'Молочная', 'CHO C uNDF Lig*2.4', 'TRUE PROTEIN',
-    'Аммиак (Прот. А1)',
-    'I - всего', 'ПРР 3x Уровень 1', 'Монензин', 'Растворимый', 'CHO B3 pdNDF', 'VAL', 'LEU'
-]
-
-# Словарь синонимов для объединения схожих полей
-synonyms_map = {
-    'RD Крахмал': 'Крахмал',
-    'RD Крахмал 3xУровень 1': 'Крахмал',
-    'RD CHO 3x': 'CHO C uNDF',
-    # добавь другие синонимы при необходимости
-}
 
 
 def parse_pdf(pdf_path):
@@ -275,22 +153,6 @@ def parse_ingredients_table(table):
         if percent_sv_value is not None and 0 <= percent_sv_value <= 100:
             ingredients[name] = percent_sv_value
     return ingredients
-
-
-def parse_nutrients_table(table):
-    df = table.df.copy()
-    name_col_idx = 0
-    sv_col_idx = 2
-    nutrients = {}
-    for _, row in df.iterrows():
-        name = str(row.iloc[name_col_idx]).strip()
-        if not name or re.search(r'нутриент|единица|сводный', name, re.I):
-            continue
-        sv_value = numeric_from_str(row.iloc[sv_col_idx])
-        if sv_value is not None:
-            nutrients[name] = sv_value
-
-    return nutrients
 
 
 def parse_pdf_diet(pdf_path):

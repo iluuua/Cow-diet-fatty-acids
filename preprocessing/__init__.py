@@ -2,8 +2,6 @@ from .filtration import (
     feed_types,
     NUTRIENT_FEATURES,
     INGREDIENT_FEATURES,
-    map_nutrients_to_features,
-    aggregate_ratios_from_codes,
 )
 from .prepare import (
     prepare_ingredients,
@@ -19,7 +17,5 @@ __all__ = [
     'feed_types',
     'NUTRIENT_FEATURES',
     'INGREDIENT_FEATURES',
-    'map_nutrients_to_features',
-    'aggregate_ratios_from_codes',
     'get_nutrients_data',
 ]
